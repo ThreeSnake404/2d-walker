@@ -1,11 +1,11 @@
-import { Box3, Vector3, type Mesh, type Object3D } from "three";
+import { Box3, Quaternion, Vector3, type Mesh, type Object3D } from "three";
 import { applyJointPose, flattenFoot, getJoint, setRestPose, wrapAngleDelta } from "./joints";
 import {
   ACTIVE_FOOT_PARTS,
   ACTIVE_LOWER_LEG_PARTS,
   ACTIVE_SHOULDER_PARTS,
   ACTIVE_UPPER_LEG_PARTS,
-  CORNER_SHOULDER_PARTS,
+  MIDDLE_SHOULDER_PARTS,
 } from "./parts";
 
 /**
@@ -57,6 +57,13 @@ const MAX_SWEEP = 40 * (Math.PI / 180);
 /** Standing arch: hip-to-foot span, and how far the foot sits below the hip. */
 const STAND_REACH = 0.72;
 const STAND_TILT = 38 * (Math.PI / 180);
+/**
+ * How far a turning foot travels along the chassis before the body yaws.
+ * Half that arc, at the stance radius, is the "half a step" the chassis then
+ * rotates, so two pivots in a cycle cover about one step of heading.
+ */
+const TURN_STEP = 0.3;
+const TURN_YAW_RATE = 0.7;
 
 function maxActiveSteps(legCount: number) {
   return Math.max(1, Math.floor(legCount / 3) || 1);
@@ -88,8 +95,21 @@ const _stance = new Vector3();
 const _spanHip = new Vector3();
 const _spanBody = new Vector3();
 const _bodyNow = new Vector3();
+const _fwd = new Vector3();
+const _right = new Vector3();
+const _yawAxis = new Vector3(0, 1, 0);
+const _qYaw = new Quaternion();
 const _stanceErr = { along: 0, sideways: 0 };
 const _meshBox = new Box3();
+
+type TurnStepSpec = { id: string; along: number };
+type TurnHalf = { steps: TurnStepSpec[] };
+type TurnCycle = {
+  sign: number;
+  half: number;
+  stage: number;
+  pivotLeft: number;
+};
 
 export type LegChain = {
   id: string;
@@ -126,6 +146,12 @@ export type WalkGait = {
    */
   goal: Vector3;
   goalActive: boolean;
+  /** Chassis-local walk stick: +X is right, +Z is forward. */
+  walkHeld: Vector3;
+  walkDriving: boolean;
+  /** Held turn: -1 clockwise from above, +1 counter-clockwise, 0 idle. */
+  turnHeld: number;
+  turn: TurnCycle | null;
 };
 
 function findNamed(root: Object3D, name: string): Object3D | null {
@@ -136,8 +162,8 @@ function findNamed(root: Object3D, name: string): Object3D | null {
   return found;
 }
 
-export function hideCornerLegs(root: Object3D) {
-  for (const name of CORNER_SHOULDER_PARTS) {
+export function hideMiddleLegs(root: Object3D) {
+  for (const name of MIDDLE_SHOULDER_PARTS) {
     const shoulder = findNamed(root, name);
     if (shoulder) shoulder.visible = false;
   }
@@ -224,10 +250,9 @@ export function plantFeetOnGround(gait: WalkGait, floorY: number) {
 
   gait.chassis.getWorldPosition(_stance);
   for (const leg of gait.legs) {
-    // Park the shoulder square to the chassis and stand the leg in the plane it
-    // already swings in, so nothing has to yaw to reach the starting stance.
-    const shoulderJoint = getJoint(leg.shoulder);
-    if (shoulderJoint) setRestPose(leg.shoulder, shoulderJoint);
+    // Keep the start yaw (front +40, back -40) so the corners already sit on a
+    // diagonal. Squaring them here would spend the shoulder's range before the
+    // first turn, which is the whole reason those four legs are showing.
     hingeWorld(leg.upper, _hinge);
     leg.upper.getWorldPosition(_hip);
     leg.foot.getWorldPosition(_from);
@@ -380,6 +405,10 @@ export function createWalkGait(root: Object3D): WalkGait {
     pending: new Vector3(),
     goal: new Vector3(),
     goalActive: false,
+    walkHeld: new Vector3(),
+    walkDriving: false,
+    turnHeld: 0,
+    turn: null,
   };
 }
 
@@ -417,6 +446,51 @@ export function translateBody(gait: WalkGait, dx: number, dz: number) {
   for (const leg of gait.legs) {
     leg.shoulder.position.x += dx;
     leg.shoulder.position.z += dz;
+  }
+  gait.root.updateMatrixWorld(true);
+  gait.moved = true;
+}
+
+function chassisAxes(gait: WalkGait) {
+  gait.chassis.updateMatrixWorld(true);
+  _fwd.set(0, 0, 1).transformDirection(gait.chassis.matrixWorld).setY(0);
+  if (_fwd.lengthSq() < 1e-8) _fwd.set(0, 0, 1);
+  _fwd.normalize();
+  _right.set(1, 0, 0).transformDirection(gait.chassis.matrixWorld).setY(0);
+  if (_right.lengthSq() < 1e-8) _right.set(1, 0, 0);
+  _right.normalize();
+}
+
+/**
+ * Yaw the chassis on the spot. Shoulders are siblings of the body, not children,
+ * so they have to orbit and yaw with it or the legs would be left behind.
+ */
+function rotateBody(gait: WalkGait, yaw: number) {
+  if (Math.abs(yaw) < 1e-8) return;
+  const cx = gait.chassis.position.x;
+  const cz = gait.chassis.position.z;
+  const c = Math.cos(yaw);
+  const s = Math.sin(yaw);
+  gait.chassis.rotateOnWorldAxis(_yawAxis, yaw);
+  _qYaw.setFromAxisAngle(_yawAxis, yaw);
+  for (const leg of gait.legs) {
+    const dx = leg.shoulder.position.x - cx;
+    const dz = leg.shoulder.position.z - cz;
+    leg.shoulder.position.x = cx + dx * c + dz * s;
+    leg.shoulder.position.z = cz - dx * s + dz * c;
+    // IK rebuilds the shoulder from rest * pose every frame, so a world yaw on
+    // the object itself is thrown away. Bake the heading into the rest pose
+    // instead: pose 0 stays "square to the chassis", and the solver never has
+    // to unwind a growing world-space error through the body.
+    const joint = getJoint(leg.shoulder);
+    if (joint) {
+      joint.restQuaternion.premultiply(_qYaw);
+      applyJointPose(leg.shoulder, joint, joint.pose);
+    }
+    const ox = leg.restOffset.x;
+    const oz = leg.restOffset.z;
+    leg.restOffset.x = ox * c + oz * s;
+    leg.restOffset.z = -ox * s + oz * c;
   }
   gait.root.updateMatrixWorld(true);
   gait.moved = true;
@@ -555,6 +629,175 @@ export function releaseBodyGoal(gait: WalkGait) {
 export function clearBodyDrag(gait: WalkGait) {
   gait.pending.set(0, 0, 0);
   gait.goalActive = false;
+  gait.walkDriving = false;
+}
+
+export function setWalkHeld(gait: WalkGait, x: number, z: number) {
+  gait.walkHeld.set(x, 0, z);
+}
+
+export function setTurnHeld(gait: WalkGait, sign: number) {
+  gait.turnHeld = sign < 0 ? -1 : sign > 0 ? 1 : 0;
+}
+
+/**
+ * Keyboard walk: keep a goal far along the held heading so the body does not
+ * stop while the key is down, the same way a held drag keeps walking. WASD is
+ * chassis-local, so W stays "forward" after a turn.
+ */
+function applyHeldWalk(gait: WalkGait) {
+  if (gait.turn || gait.turnHeld) {
+    if (gait.walkDriving) {
+      releaseBodyGoal(gait);
+      gait.walkDriving = false;
+    }
+    return;
+  }
+  const hx = gait.walkHeld.x;
+  const hz = gait.walkHeld.z;
+  if (hx * hx + hz * hz < 1e-8) {
+    if (gait.walkDriving) {
+      releaseBodyGoal(gait);
+      gait.walkDriving = false;
+    }
+    return;
+  }
+  chassisAxes(gait);
+  gait.chassis.getWorldPosition(_bodyNow);
+  const reach = Math.max(4, legReach(gait) * 8);
+  setBodyGoal(
+    gait,
+    _bodyNow.x + _right.x * hx * reach + _fwd.x * hz * reach,
+    _bodyNow.z + _right.z * hx * reach + _fwd.z * hz * reach,
+  );
+  gait.walkDriving = true;
+}
+
+function findLeg(gait: WalkGait, id: string) {
+  return gait.legs.find((leg) => leg.id === id) ?? null;
+}
+
+/**
+ * One clockwise cycle from above, as two halves. Diagonally opposite corners
+ * hold while the other pair steps one at a time, then every planted shoulder
+ * yaws together and the chassis turns a half step.
+ *
+ * Clockwise:
+ *   Right1+Left3 hold; Left1 forward, Right3 back; pivot;
+ *   Left1+Right3 hold; Right1 back, Left3 forward; pivot.
+ * Counter-clockwise reverses both the order and the step directions.
+ */
+function turnHalves(sign: number): TurnHalf[] {
+  const cw: TurnHalf[] = [
+    {
+      steps: [
+        { id: "Left1", along: 1 },
+        { id: "Right3", along: -1 },
+      ],
+    },
+    {
+      steps: [
+        { id: "Right1", along: -1 },
+        { id: "Left3", along: 1 },
+      ],
+    },
+  ];
+  if (sign < 0) return cw;
+  return [
+    { steps: cw[1].steps.map((step) => ({ id: step.id, along: -step.along })).reverse() },
+    { steps: cw[0].steps.map((step) => ({ id: step.id, along: -step.along })).reverse() },
+  ];
+}
+
+function beginTurnStep(gait: WalkGait, spec: TurnStepSpec, now: number) {
+  const leg = findLeg(gait, spec.id);
+  if (!leg || leg.step) return;
+  chassisAxes(gait);
+  gait.chassis.getWorldPosition(_stance);
+  const px = leg.plant.x - _stance.x;
+  const pz = leg.plant.z - _stance.z;
+  const before = px * _fwd.x + pz * _fwd.z;
+  const angle = halfStepYaw(gait) * 2;
+  // Orbit the plant around the body so the step cannot collapse when the foot
+  // is already at the far edge of the arch. Pick the sign that moves the foot
+  // forward or back along the chassis, which is what "step forward" means here.
+  let bestX = leg.plant.x;
+  let bestZ = leg.plant.z;
+  let bestScore = -Infinity;
+  for (const sign of [1, -1]) {
+    const a = angle * sign;
+    const ox = px * Math.cos(a) + pz * Math.sin(a);
+    const oz = -px * Math.sin(a) + pz * Math.cos(a);
+    const along = ox * _fwd.x + oz * _fwd.z - before;
+    const score = along * spec.along;
+    if (score > bestScore) {
+      bestScore = score;
+      bestX = _stance.x + ox;
+      bestZ = _stance.z + oz;
+    }
+  }
+  _to.set(bestX, leg.plant.y, bestZ);
+  const from = leg.plant.clone();
+  if (from.distanceTo(_to) < 0.2) return;
+  leg.step = { from, to: _to.clone(), start: now, duration: STEP_DURATION_MS };
+}
+
+function stanceRadius(gait: WalkGait) {
+  let radius = 0;
+  for (const leg of gait.legs) radius += Math.hypot(leg.restOffset.x, leg.restOffset.z);
+  return gait.legs.length ? radius / gait.legs.length : 1;
+}
+
+function halfStepYaw(gait: WalkGait) {
+  const radius = Math.max(1, stanceRadius(gait));
+  return Math.max(0.08, Math.min(0.28, (legReach(gait) * TURN_STEP * 0.5) / radius));
+}
+
+function advanceTurn(gait: WalkGait, dtMs: number, now: number) {
+  if (gait.turnHeld && !gait.turn) {
+    clearBodyDrag(gait);
+    gait.turn = { sign: gait.turnHeld, half: 0, stage: 0, pivotLeft: 0 };
+  }
+  if (!gait.turn) return false;
+  if (gaitHasSteps(gait)) return true;
+
+  const halves = turnHalves(gait.turn.sign);
+  const half = halves[gait.turn.half];
+
+  if (gait.turn.stage < half.steps.length) {
+    beginTurnStep(gait, half.steps[gait.turn.stage], now);
+    gait.turn.stage += 1;
+    return true;
+  }
+
+  if (gait.turn.stage === half.steps.length) {
+    gait.turn.pivotLeft = halfStepYaw(gait) * gait.turn.sign;
+    gait.turn.stage += 1;
+  }
+  if (Math.abs(gait.turn.pivotLeft) > 1e-4) {
+    const rate = TURN_YAW_RATE * (Math.min(MAX_FRAME_MS, Math.max(0, dtMs)) / 1000);
+    const step = Math.max(-rate, Math.min(rate, gait.turn.pivotLeft));
+    rotateBody(gait, step);
+    gait.turn.pivotLeft -= step;
+    return true;
+  }
+
+  recaptureStance(gait);
+  if (gait.turnHeld === gait.turn.sign) {
+    gait.turn.half = gait.turn.half === 0 ? 1 : 0;
+    gait.turn.stage = 0;
+    gait.turn.pivotLeft = 0;
+  } else if (gait.turnHeld === 0) {
+    gait.turn = null;
+  } else {
+    gait.turn = { sign: gait.turnHeld, half: 0, stage: 0, pivotLeft: 0 };
+  }
+  return true;
+}
+
+export function applyHeldInputs(gait: WalkGait, dtMs: number, now: number) {
+  applyHeldWalk(gait);
+  advanceTurn(gait, dtMs, now);
 }
 
 /** Drain the queued drag at walking speed so the gait always has time to step. */
@@ -583,6 +826,7 @@ function faceShoulder(leg: LegChain, target: Vector3) {
   const joint = getJoint(leg.shoulder);
   if (!joint) return;
 
+  const held = joint.pose;
   applyJointPose(leg.shoulder, joint, 0);
   hingeWorld(leg.upper, _hinge);
   const restHinge = Math.atan2(_hinge.x, _hinge.z);
@@ -590,7 +834,7 @@ function faceShoulder(leg: LegChain, target: Vector3) {
   hingeWorld(leg.upper, _hinge);
   const sign = wrapAngleDelta(Math.atan2(_hinge.x, _hinge.z) - restHinge) >= 0 ? 1 : -1;
 
-  let pose = joint.pose;
+  let pose = held;
   for (let i = 0; i < 3; i += 1) {
     applyJointPose(leg.shoulder, joint, pose);
     hingeWorld(leg.upper, _hinge);
@@ -603,16 +847,27 @@ function faceShoulder(leg: LegChain, target: Vector3) {
     // plane is offset from the hip rather than through it. Aiming the hinge dead
     // perpendicular therefore misses by that offset; open the angle to suit.
     const span = Math.hypot(ox, oz);
+    // Closer than the built-in side offset means the foot has crossed under the
+    // hip. There is no legal swing plane through that point; keep the last pose
+    // rather than snapping to the through-the-body heading.
+    if (span < Math.abs(leg.sideOffset) + 0.05) break;
     const spread = Math.acos(Math.min(1, Math.max(-1, leg.sideOffset / span)));
     const toTarget = Math.atan2(ox, oz);
     const optionA = wrapAngleDelta(toTarget - spread);
     const optionB = wrapAngleDelta(toTarget + spread);
-    const current = Math.atan2(_hinge.x, _hinge.z);
-    const desired =
-      Math.abs(wrapAngleDelta(optionA - current)) <= Math.abs(wrapAngleDelta(optionB - current))
-        ? optionA
-        : optionB;
-    pose = sign * wrapAngleDelta(desired - restHinge);
+    const poseA = sign * wrapAngleDelta(optionA - restHinge);
+    const poseB = sign * wrapAngleDelta(optionB - restHinge);
+    // Two headings aim the hinge at the foot. One keeps the leg outboard; the
+    // other is the same plane flipped through the chassis. Take the pose nearer
+    // the current one, and refuse a jump past a right angle.
+    const cost = (candidate: number) => {
+      const jump = Math.abs(wrapAngleDelta(candidate - pose));
+      const clip = candidate < joint.min ? joint.min - candidate : candidate > joint.max ? candidate - joint.max : 0;
+      return jump + clip * 4 + (jump > Math.PI * 0.5 ? 8 : 0);
+    };
+    const next = cost(poseA) <= cost(poseB) ? poseA : poseB;
+    if (Math.abs(wrapAngleDelta(next - pose)) > Math.PI * 0.5) break;
+    pose = next;
   }
   applyJointPose(leg.shoulder, joint, pose);
 }
@@ -649,10 +904,16 @@ function solveReach(leg: LegChain, target: Vector3, keepGround = false) {
   _upperB.copy(_toTarget).applyAxisAngle(_hinge, -usedBend);
   _kneeA.copy(_hip).addScaledVector(_upperA, leg.upperLen);
   _kneeB.copy(_hip).addScaledVector(_upperB, leg.upperLen);
-  // Always take the knee-up solution. Which of the two the +/- bend produces
-  // depends on the hinge direction, so remembering a side across frames lets the
-  // arch invert when that flips; deciding from the geometry every time cannot.
-  _upperDir.copy(_kneeA.y >= _kneeB.y ? _upperA : _upperB);
+  // Knee-up, but never an upper bone that points skyward. A flipped hinge can
+  // make the "higher" knee the one that stands the leg straight up or folds it
+  // through the chassis; the other solution is the arch we actually want.
+  const aRise = _kneeA.y - _hip.y;
+  const bRise = _kneeB.y - _hip.y;
+  _upperDir.copy(aRise >= bRise ? _upperA : _upperB);
+  if (_upperDir.y > 0.25) {
+    const other = _upperDir === _upperA ? _upperB : _upperA;
+    if (other.y < _upperDir.y) _upperDir.copy(other);
+  }
 
   boneVector(leg.upper, leg.lower, _restBone);
   poseToward(leg.upper, _restBone, _upperDir, _hinge);
@@ -845,6 +1106,7 @@ export function solveWalkGait(gait: WalkGait, now = performance.now()) {
     const need = solvePlanted(gait, leg, _target);
     needs.push({ leg, ...need });
   }
+  if (gait.turn) return;
   if (!moving) return;
   const next = pickNextStepper(gait, needs);
   if (next) beginStep(gait, next, now);
@@ -855,7 +1117,14 @@ export function gaitHasSteps(gait: WalkGait) {
 }
 
 export function gaitIsBusy(gait: WalkGait) {
-  return gaitHasSteps(gait) || Math.hypot(gait.pending.x, gait.pending.z) > 1e-6;
+  return (
+    !!gait.turn ||
+    gait.turnHeld !== 0 ||
+    gait.walkDriving ||
+    gait.walkHeld.lengthSq() > 1e-8 ||
+    gaitHasSteps(gait) ||
+    Math.hypot(gait.pending.x, gait.pending.z) > 1e-6
+  );
 }
 
 export function setMoveDirection(gait: WalkGait, dx: number, dz: number) {

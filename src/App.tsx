@@ -129,7 +129,9 @@ export default function App() {
               digits={2}
               onCommit={(next: AxisVec3) => chassisApiRef.current?.setPosition(next)}
             />
-            <p className="chassis-pos-hint">Walk drag is on the ZX ground plane. Type 0, 0, 0 to return home.</p>
+            <p className="chassis-pos-hint">
+              WASD walks, arrows turn. Drag is on the ZX ground plane. Type 0, 0, 0 to return home.
+            </p>
           </div>
         </div>
         <button
@@ -145,7 +147,7 @@ export default function App() {
 
       <div className="hud hud-bottom">
         <span className="hud-label">Selected segment</span>
-        <strong>{selectedPart ?? "Click the chassis to walk, or a limb to pose"}</strong>
+        <strong>{selectedPart ?? "WASD walk, arrows turn, or click a limb to pose"}</strong>
       </div>
     </div>
   );

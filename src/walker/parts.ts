@@ -14,19 +14,26 @@ export const FOOT_PARTS = segmentNames("Foot");
 export const HINGE_PARTS = [...UPPER_LEG_PARTS, ...LOWER_LEG_PARTS, ...FOOT_PARTS] as const;
 export const MOVABLE_PARTS = [...SHOULDER_PARTS, ...HINGE_PARTS] as const;
 
-/** Index 2 is the middle pair. Corner legs (1 and 3) stay in the model but are hidden. */
-export const ACTIVE_LEG_INDEX = "2";
-export const CORNER_SHOULDER_PARTS = [
-  "ShoulderLeft1",
-  "ShoulderRight1",
-  "ShoulderLeft3",
-  "ShoulderRight3",
-] as const;
-export const ACTIVE_SHOULDER_PARTS = SHOULDER_PARTS.filter((name) => name.endsWith(ACTIVE_LEG_INDEX));
-export const ACTIVE_UPPER_LEG_PARTS = UPPER_LEG_PARTS.filter((name) => name.endsWith(ACTIVE_LEG_INDEX));
-export const ACTIVE_LOWER_LEG_PARTS = LOWER_LEG_PARTS.filter((name) => name.endsWith(ACTIVE_LEG_INDEX));
-export const ACTIVE_FOOT_PARTS = FOOT_PARTS.filter((name) => name.endsWith(ACTIVE_LEG_INDEX));
-export const ACTIVE_MOVABLE_PARTS = MOVABLE_PARTS.filter((name) => name.endsWith(ACTIVE_LEG_INDEX));
+/**
+ * Index 1 is the front pair, 3 the back pair, 2 the middle. Only the four
+ * corners walk: their diagonal splay puts each foot well off both axes, which
+ * is what gives a turn any leverage, and diagonally opposite corners can hold
+ * the body while the other two step. The middle pair stays in the model but is
+ * hidden until the corner gait is settled.
+ */
+export const ACTIVE_LEG_INDICES = ["1", "3"] as const;
+export const MIDDLE_LEG_INDEX = "2";
+
+function isActiveIndex(name: string) {
+  return ACTIVE_LEG_INDICES.some((index) => name.endsWith(index));
+}
+
+export const MIDDLE_SHOULDER_PARTS = SHOULDER_PARTS.filter((name) => name.endsWith(MIDDLE_LEG_INDEX));
+export const ACTIVE_SHOULDER_PARTS = SHOULDER_PARTS.filter(isActiveIndex);
+export const ACTIVE_UPPER_LEG_PARTS = UPPER_LEG_PARTS.filter(isActiveIndex);
+export const ACTIVE_LOWER_LEG_PARTS = LOWER_LEG_PARTS.filter(isActiveIndex);
+export const ACTIVE_FOOT_PARTS = FOOT_PARTS.filter(isActiveIndex);
+export const ACTIVE_MOVABLE_PARTS = MOVABLE_PARTS.filter(isActiveIndex);
 export const SELECTABLE_PARTS = ["Chassis", ...ACTIVE_MOVABLE_PARTS] as const;
 
 export const PART_NAMES = ["Chassis", ...MOVABLE_PARTS] as const;
@@ -71,7 +78,7 @@ export function isUpperLegPart(name: string): name is (typeof UPPER_LEG_PARTS)[n
 }
 
 export function isActiveLimbPart(name: string): boolean {
-  return isMovablePart(name) && name.endsWith(ACTIVE_LEG_INDEX);
+  return isMovablePart(name) && isActiveIndex(name);
 }
 
 export function isFrontShoulderPart(name: string): boolean {

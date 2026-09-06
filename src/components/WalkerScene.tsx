@@ -52,6 +52,13 @@ export function WalkerScene({
   );
 
   useEffect(() => {
+    if (orbitControls) {
+      const orbit = orbitControls as OrbitControlsImpl & { enableKeys?: boolean };
+      orbit.enableKeys = false;
+    }
+  }, [orbitControls]);
+
+  useEffect(() => {
     const controls = controlsRef.current;
     if (camera && controls && framedRef.current) {
       onReady(camera, controls, {

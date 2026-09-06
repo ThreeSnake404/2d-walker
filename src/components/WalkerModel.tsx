@@ -20,16 +20,19 @@ import { applyStartPose, bindJoints } from "../walker/joints";
 import { findPartName, isChassisPart, MODEL_URL, type PartName } from "../walker/parts";
 import {
   advanceBody,
+  applyHeldInputs,
   capturePlants,
   clearBodyDrag,
   createWalkGait,
   gaitIsBusy,
-  hideCornerLegs,
+  hideMiddleLegs,
   plantFeetOnGround,
   readChassisPosition,
   releaseBodyGoal,
   setBodyGoal,
   setBodyPosition,
+  setTurnHeld,
+  setWalkHeld,
   solveWalkGait,
   visibleBounds,
   type ChassisPosition,
@@ -112,7 +115,7 @@ export function WalkerModel({
     bakeBindScale(model);
     bindJoints(model);
     applyStartPose(model);
-    hideCornerLegs(model);
+    hideMiddleLegs(model);
     const gait = createWalkGait(model);
     plantFeetOnGround(gait, 0);
     gaitRef.current = gait;
@@ -157,7 +160,9 @@ export function WalkerModel({
       const gait = gaitRef.current;
       const now = performance.now();
       if (gait && gaitIsBusy(gait)) {
-        advanceBody(gait, last ? now - last : 16);
+        const dt = last ? now - last : 16;
+        applyHeldInputs(gait, dt, now);
+        advanceBody(gait, dt);
         solveWalkGait(gait, now);
         invalidate();
         onChassisMoveRef.current(readChassisPosition(gait));
@@ -168,6 +173,68 @@ export function WalkerModel({
     raf = window.requestAnimationFrame(tick);
     return () => window.cancelAnimationFrame(raf);
   }, [invalidate]);
+
+  useEffect(() => {
+    const pressed = { w: false, a: false, s: false, d: false, up: false, down: false, left: false, right: false };
+
+    const isTyping = (event: KeyboardEvent) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return false;
+      if (target.isContentEditable) return true;
+      return Boolean(target.closest("input, textarea, select"));
+    };
+
+    const syncKeys = () => {
+      const gait = gaitRef.current;
+      if (!gait) return;
+      setWalkHeld(
+        gait,
+        (pressed.a ? 1 : 0) - (pressed.d ? 1 : 0),
+        (pressed.w || pressed.up ? 1 : 0) - (pressed.s || pressed.down ? 1 : 0),
+      );
+      const turn = (pressed.left ? 1 : 0) - (pressed.right ? 1 : 0);
+      setTurnHeld(gait, turn);
+    };
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.repeat || isTyping(event)) return;
+      const key = event.key;
+      if (key === "w" || key === "W") pressed.w = true;
+      else if (key === "ArrowUp") pressed.up = true;
+      else if (key === "a" || key === "A") pressed.a = true;
+      else if (key === "s" || key === "S") pressed.s = true;
+      else if (key === "ArrowDown") pressed.down = true;
+      else if (key === "d" || key === "D") pressed.d = true;
+      else if (key === "ArrowLeft") pressed.left = true;
+      else if (key === "ArrowRight") pressed.right = true;
+      else return;
+      event.preventDefault();
+      syncKeys();
+    };
+
+    const onKeyUp = (event: KeyboardEvent) => {
+      if (isTyping(event)) return;
+      const key = event.key;
+      if (key === "w" || key === "W") pressed.w = false;
+      else if (key === "ArrowUp") pressed.up = false;
+      else if (key === "a" || key === "A") pressed.a = false;
+      else if (key === "s" || key === "S") pressed.s = false;
+      else if (key === "ArrowDown") pressed.down = false;
+      else if (key === "d" || key === "D") pressed.d = false;
+      else if (key === "ArrowLeft") pressed.left = false;
+      else if (key === "ArrowRight") pressed.right = false;
+      else return;
+      event.preventDefault();
+      syncKeys();
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+    };
+  }, []);
 
   useEffect(() => {
     const element = gl.domElement;
