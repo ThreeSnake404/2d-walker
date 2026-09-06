@@ -6,10 +6,6 @@ A React + Three.js viewer for a Blender-exported 2D walking model.
 
 **[Open 2D Walker](https://threesnake404.github.io/2d-walker/)**
 
-Or launch an editable copy:
-
-**[Open in StackBlitz](https://stackblitz.com/github/ThreeSnake404/2d-walker)**
-
 Drag to orbit, use Front / Top / Right, and click a left leg segment to see its name.
 
 ## Run locally
