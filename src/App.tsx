@@ -1,6 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 import { Canvas } from "@react-three/fiber";
-import type { OrthographicCamera } from "three";
+import type { Camera } from "three";
 import type { OrbitControlsImpl } from "./walker/controls";
 import { CameraPoseControls } from "./components/CameraPoseControls";
 import { WalkerScene } from "./components/WalkerScene";
@@ -24,28 +24,34 @@ import type { PartName } from "./walker/parts";
 import "./App.css";
 
 export default function App() {
-  const cameraRef = useRef<OrthographicCamera | null>(null);
+  const cameraRef = useRef<Camera | null>(null);
   const controlsRef = useRef<OrbitControlsImpl | null>(null);
   const frameRef = useRef<FrameInfo | null>(null);
+  const poseRef = useRef<CameraPose>({ x: 0, y: 0, z: 0 });
   const [cameraPose, setCameraPose] = useState<CameraPose>({ x: 0, y: 0, z: 0 });
+  const [orthographic, setOrthographic] = useState(true);
   const [selectedPart, setSelectedPart] = useState<PartName | null>(null);
   const [saveStatus, setSaveStatus] = useState("Save this view as the next startup orientation.");
 
-  const syncPose = useCallback((camera: OrthographicCamera) => {
-    setCameraPose(poseFromCamera(camera));
+  const syncPose = useCallback((camera: Camera) => {
+    const pose = poseFromCamera(camera);
+    poseRef.current = pose;
+    setCameraPose(pose);
   }, []);
 
   const handleReady = useCallback(
-    (camera: OrthographicCamera, controls: OrbitControlsImpl, frame: FrameInfo) => {
+    (camera: Camera, controls: OrbitControlsImpl, frame: FrameInfo) => {
       cameraRef.current = camera;
       controlsRef.current = controls;
       frameRef.current = frame;
+      applyCameraPose(camera, controls, poseRef.current, frame);
       syncPose(camera);
     },
     [syncPose],
   );
 
   const handleCameraMove = useCallback((pose: CameraPose) => {
+    poseRef.current = pose;
     setCameraPose(pose);
   }, []);
 
@@ -64,6 +70,7 @@ export default function App() {
       const frame = frameRef.current;
       if (!camera || !controls || !frame) return;
       applyViewPreset(camera, controls, preset, frame);
+      poseRef.current = VIEW_PRESETS[preset];
       setCameraPose(VIEW_PRESETS[preset]);
     },
     [syncPose],
@@ -108,8 +115,13 @@ export default function App() {
   return (
     <div className="app">
       <Canvas
-        orthographic
-        camera={{ position: [0, 2, 40], zoom: 20, near: 0.1, far: 2000, up: [0, 1, 0] }}
+        key={orthographic ? "ortho" : "persp"}
+        orthographic={orthographic}
+        camera={
+          orthographic
+            ? { position: [0, 2, 40], zoom: 20, near: 0.1, far: 2000, up: [0, 1, 0] }
+            : { position: [0, 2, 40], fov: 45, near: 0.1, far: 2000, up: [0, 1, 0] }
+        }
         frameloop="always"
         gl={{ antialias: true }}
         dpr={[1, 2]}
@@ -125,7 +137,7 @@ export default function App() {
       <div className="hud hud-top">
         <div>
           <h1>2D Walker</h1>
-          <p>Click a leg or foot to select · click again to deselect · drag a selected segment to rotate</p>
+          <p>Click a shoulder, leg, or foot to select · click again to deselect · drag to rotate within joint limits</p>
         </div>
         <button type="button" onClick={handleSaveView}>
           Save starting view
@@ -135,9 +147,11 @@ export default function App() {
       <div className="hud hud-pose">
         <CameraPoseControls
           value={cameraPose}
+          orthographic={orthographic}
           onCommit={handlePoseCommit}
           onViewPreset={handleViewPreset}
           onLoadOrientation={handleLoadOrientation}
+          onToggleProjection={() => setOrthographic((current) => !current)}
         />
       </div>
 
@@ -145,7 +159,7 @@ export default function App() {
 
       <div className="hud hud-bottom">
         <span className="hud-label">Selected segment</span>
-        <strong>{selectedPart ?? "Click a leg or foot to select"}</strong>
+        <strong>{selectedPart ?? "Click a shoulder, leg, or foot to select"}</strong>
       </div>
     </div>
   );

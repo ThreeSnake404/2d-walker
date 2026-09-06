@@ -74,6 +74,7 @@ function walkerProjectPlugin(): Plugin {
       const outDir = path.resolve(rootDir, "dist/model");
       fs.mkdirSync(outDir, { recursive: true });
       for (const file of fs.readdirSync(modelDir)) {
+        if (!file.includes("v0_3")) continue;
         fs.copyFileSync(path.join(modelDir, file), path.join(outDir, file));
       }
     },

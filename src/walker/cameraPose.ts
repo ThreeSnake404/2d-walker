@@ -1,4 +1,4 @@
-import { Euler, Vector3, type OrthographicCamera } from "three";
+import { Euler, Vector3, type Camera, type OrthographicCamera } from "three";
 import type { OrbitControlsImpl } from "./controls";
 
 export const EULER_ORDER = "XYZ";
@@ -42,7 +42,14 @@ export function wrapDegrees(value: number) {
   return Math.round(wrapped * 10) / 10;
 }
 
-export function poseFromCamera(camera: OrthographicCamera): CameraPose {
+function setCameraZoom(camera: Camera, zoom: number) {
+  const ortho = camera as OrthographicCamera;
+  if (!ortho.isOrthographicCamera) return;
+  ortho.zoom = zoom;
+  ortho.updateProjectionMatrix();
+}
+
+export function poseFromCamera(camera: Camera): CameraPose {
   _euler.setFromQuaternion(camera.quaternion, EULER_ORDER);
   return {
     x: wrapDegrees(radToDeg(_euler.x)),
@@ -52,7 +59,7 @@ export function poseFromCamera(camera: OrthographicCamera): CameraPose {
 }
 
 function snapCamera(
-  camera: OrthographicCamera,
+  camera: Camera,
   controls: OrbitControlsImpl,
   position: Vector3,
   up: Vector3,
@@ -79,7 +86,7 @@ function snapCamera(
 }
 
 export function applyCameraPose(
-  camera: OrthographicCamera,
+  camera: Camera,
   controls: OrbitControlsImpl,
   pose: CameraPose,
   frame?: Partial<FrameInfo>,
@@ -87,10 +94,7 @@ export function applyCameraPose(
   const distance = frame?.distance ?? Math.max(camera.position.distanceTo(controls.target), 1);
 
   if (frame?.center) controls.target.fromArray(frame.center);
-  if (frame?.zoom != null) {
-    camera.zoom = frame.zoom;
-    camera.updateProjectionMatrix();
-  }
+  if (frame?.zoom != null) setCameraZoom(camera, frame.zoom);
 
   _target.copy(controls.target);
   _euler.set(degToRad(pose.x), degToRad(pose.y), degToRad(pose.z), EULER_ORDER);
@@ -103,7 +107,7 @@ export function applyCameraPose(
 }
 
 export function snapLookAt(
-  camera: OrthographicCamera,
+  camera: Camera,
   controls: OrbitControlsImpl,
   position: [number, number, number],
   up: [number, number, number],
@@ -117,14 +121,13 @@ export function snapLookAt(
 }
 
 export function applyViewPreset(
-  camera: OrthographicCamera,
+  camera: Camera,
   controls: OrbitControlsImpl,
   preset: ViewPreset,
   frame: FrameInfo,
 ) {
   _target.fromArray(frame.center);
-  camera.zoom = frame.zoom;
-  camera.updateProjectionMatrix();
+  setCameraZoom(camera, frame.zoom);
 
   if (preset === "front") {
     _position.set(_target.x, _target.y, _target.z + frame.distance);

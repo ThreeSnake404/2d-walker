@@ -12,6 +12,8 @@ import {
   type LimbDrag,
   type PickedLimb,
 } from "../walker/dragRotate";
+import { bakeBindScale } from "../walker/bindScale";
+import { applyStartPose, bindJoints } from "../walker/joints";
 import { findPartName, MODEL_URL, type PartName } from "../walker/parts";
 
 const DRAG_PX = 12;
@@ -59,8 +61,11 @@ export function WalkerModel({ selectedPart, orbitControls, onBounds, onSelectPar
         ? mesh.material.map((material) => material.clone())
         : mesh.material.clone();
     });
-    onBounds(new Box3().setFromObject(model));
+    bakeBindScale(model);
+    bindJoints(model);
+    applyStartPose(model);
     attachPickVolumes(model);
+    onBounds(new Box3().setFromObject(model));
   }, [model, onBounds]);
 
   useEffect(() => {

@@ -5,17 +5,14 @@ import {
   Mesh,
   MeshBasicMaterial,
   Plane,
-  Quaternion,
   Raycaster,
   Vector2,
   Vector3,
   type Camera,
   type Object3D,
 } from "three";
+import { applyJointPose, getJoint, wrapAngleDelta } from "./joints";
 import { findPartName, isMovablePart, MOVABLE_PARTS, type PartName } from "./parts";
-
-/** Fallback when the camera direction is unavailable. */
-export const WALK_PLANE_NORMAL = new Vector3(0, 0, 1);
 
 const _viewDir = new Vector3();
 const _screenX = new Vector3();
@@ -33,9 +30,7 @@ const _size = new Vector3();
 const _center = new Vector3();
 const _meshToPart = new Matrix4();
 const _inversePart = new Matrix4();
-const _qAxis = new Quaternion();
-const _qWorld = new Quaternion();
-const _qParent = new Quaternion();
+const _axisRef = new Vector3();
 
 /** Front-view limbs are only a few pixels tall; pad clicks in screen space. */
 const PICK_PAD_PX = 24;
@@ -44,8 +39,8 @@ const PICK_VOLUME_MIN = 2.2;
 
 export type LimbDrag = {
   object: Object3D;
-  startQuaternion: Quaternion;
-  startAngle: number;
+  startPose: number;
+  startPointerAngle: number;
 };
 
 export type PickedLimb = {
@@ -271,16 +266,7 @@ function pointerToNdc(clientX: number, clientY: number, element: HTMLElement) {
   _ndc.set(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
 }
 
-function viewAxes(camera: Camera) {
-  camera.getWorldDirection(_viewDir);
-  if (_viewDir.lengthSq() < 1e-10) _viewDir.copy(WALK_PLANE_NORMAL);
-  _viewDir.normalize();
-  _screenX.setFromMatrixColumn(camera.matrixWorld, 0).normalize();
-  _screenY.setFromMatrixColumn(camera.matrixWorld, 1).normalize();
-}
-
 function intersectWalkPlane(camera: Camera, clientX: number, clientY: number, element: HTMLElement, joint: Vector3) {
-  viewAxes(camera);
   pointerToNdc(clientX, clientY, element);
   _raycaster.setFromCamera(_ndc, camera);
   _plane.setFromNormalAndCoplanarPoint(_viewDir, joint);
@@ -294,6 +280,22 @@ function angleAroundWalkAxis(point: Vector3, joint: Vector3) {
   return Math.atan2(_offset.dot(_screenY), _offset.dot(_screenX));
 }
 
+function jointDragPlane(object: Object3D) {
+  const joint = getJoint(object);
+  if (!joint) return null;
+  const parent = object.parent;
+  if (parent) {
+    _viewDir.copy(joint.axisLocal).transformDirection(parent.matrixWorld).normalize();
+  } else {
+    _viewDir.copy(joint.axisLocal).normalize();
+  }
+  _screenX.crossVectors(_viewDir, _axisRef.set(0, 1, 0));
+  if (_screenX.lengthSq() < 1e-8) _screenX.crossVectors(_viewDir, _axisRef.set(1, 0, 0));
+  _screenX.normalize();
+  _screenY.crossVectors(_viewDir, _screenX).normalize();
+  return joint;
+}
+
 export function beginLimbDrag(
   object: Object3D,
   camera: Camera,
@@ -301,14 +303,17 @@ export function beginLimbDrag(
   clientY: number,
   element: HTMLElement,
 ): LimbDrag | null {
+  const joint = jointDragPlane(object);
+  if (!joint) return null;
   object.getWorldPosition(_joint);
   const hit = intersectWalkPlane(camera, clientX, clientY, element, _joint);
   if (!hit) return null;
-  const startAngle = angleAroundWalkAxis(hit, _joint) ?? 0;
+  const startPointerAngle = angleAroundWalkAxis(hit, _joint);
+  if (startPointerAngle === null) return null;
   return {
     object,
-    startQuaternion: object.quaternion.clone(),
-    startAngle,
+    startPose: joint.pose,
+    startPointerAngle,
   };
 }
 
@@ -319,34 +324,12 @@ export function updateLimbDrag(
   clientY: number,
   element: HTMLElement,
 ) {
+  const joint = jointDragPlane(drag.object);
+  if (!joint) return;
   drag.object.getWorldPosition(_joint);
   const hit = intersectWalkPlane(camera, clientX, clientY, element, _joint);
   if (!hit) return;
   const angle = angleAroundWalkAxis(hit, _joint);
   if (angle === null) return;
-
-  const delta = angle - drag.startAngle;
-  viewAxes(camera);
-  applyWorldAxisRotation(drag.object, _viewDir, -delta, drag.startQuaternion);
-}
-
-function applyWorldAxisRotation(
-  object: Object3D,
-  axis: Vector3,
-  angle: number,
-  startLocal: Quaternion,
-) {
-  object.quaternion.copy(startLocal);
-  object.updateMatrixWorld(true);
-  object.getWorldQuaternion(_qWorld);
-  _qAxis.setFromAxisAngle(axis, angle);
-  _qWorld.premultiply(_qAxis);
-
-  if (object.parent) {
-    object.parent.getWorldQuaternion(_qParent);
-    object.quaternion.copy(_qParent.invert().multiply(_qWorld));
-  } else {
-    object.quaternion.copy(_qWorld);
-  }
-  object.updateMatrixWorld(true);
+  applyJointPose(drag.object, joint, drag.startPose + wrapAngleDelta(angle - drag.startPointerAngle));
 }

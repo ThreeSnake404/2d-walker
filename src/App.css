@@ -142,6 +142,15 @@
   background: #3a4656;
 }
 
+.view-buttons .view-button-projection {
+  color: #11141a;
+  background: #7ec8e3;
+}
+
+.view-buttons .view-button-projection:hover {
+  background: #9ad7ed;
+}
+
 .view-buttons .view-button-load {
   color: #11141a;
   background: #f0c14b;

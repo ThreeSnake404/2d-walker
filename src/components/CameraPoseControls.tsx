@@ -15,16 +15,20 @@ function formatAxis(value: number) {
 
 type CameraPoseControlsProps = {
   value: CameraPose;
+  orthographic: boolean;
   onCommit: (next: CameraPose) => void;
   onViewPreset: (preset: ViewPreset) => void;
   onLoadOrientation: () => void;
+  onToggleProjection: () => void;
 };
 
 export function CameraPoseControls({
   value,
+  orthographic,
   onCommit,
   onViewPreset,
   onLoadOrientation,
+  onToggleProjection,
 }: CameraPoseControlsProps) {
   const [draft, setDraft] = useState({
     x: formatAxis(value.x),
@@ -92,6 +96,9 @@ export function CameraPoseControls({
         </button>
         <button type="button" onClick={() => onViewPreset("right")}>
           Right
+        </button>
+        <button type="button" className="view-button-projection" onClick={onToggleProjection}>
+          {orthographic ? "Perspective" : "Orthographic"}
         </button>
         <button type="button" className="view-button-load" onClick={onLoadOrientation}>
           Load Orientation

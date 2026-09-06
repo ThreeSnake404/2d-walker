@@ -1,12 +1,12 @@
 # 2D Walker
 
-Version **2Legs**. A React + Three.js viewer for a Blender-exported 2D walking model.
+A React + Three.js poser for the six-leg `2DWalker_v0_3` model.
 
 ## Run in your browser
 
 **[Open 2D Walker](https://threesnake404.github.io/2d-walker/)**
 
-Click a leg or foot to select it, click the same segment again to deselect, and drag a selected segment to rotate it. Empty space orbits the camera. Use Front / Top / Right to change the view.
+Click a shoulder, leg, or foot to select it, click again to deselect, and drag to rotate within joint limits. Empty space orbits the camera. Use Front / Top / Right, and switch between Orthographic and Perspective.
 
 ## Run locally
 

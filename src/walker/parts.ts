@@ -1,31 +1,58 @@
-export const MODEL_URL = `${import.meta.env.BASE_URL}model/2DWalker_v0_1.gltf`;
+export const MODEL_URL = `${import.meta.env.BASE_URL}model/2DWalker_v0_3.gltf`;
 
-export const PART_NAMES = [
-  "Base",
-  "UpperLegLeft",
-  "LowerLegLeft",
-  "FootLeft",
-  "UpperLegRight",
-  "LowerLegRight",
-  "FootRight",
-] as const;
+const SIDES = ["Left", "Right"] as const;
+const INDICES = [1, 2, 3] as const;
+
+function segmentNames(prefix: "Shoulder" | "UpperLeg" | "LowerLeg" | "Foot") {
+  return SIDES.flatMap((side) => INDICES.map((index) => `${prefix}${side}${index}` as const));
+}
+
+export const SHOULDER_PARTS = segmentNames("Shoulder");
+export const UPPER_LEG_PARTS = segmentNames("UpperLeg");
+export const LOWER_LEG_PARTS = segmentNames("LowerLeg");
+export const FOOT_PARTS = segmentNames("Foot");
+export const HINGE_PARTS = [...UPPER_LEG_PARTS, ...LOWER_LEG_PARTS, ...FOOT_PARTS] as const;
+export const MOVABLE_PARTS = [...SHOULDER_PARTS, ...HINGE_PARTS] as const;
+
+export const PART_NAMES = ["Chassis", ...MOVABLE_PARTS] as const;
 
 export type PartName = (typeof PART_NAMES)[number];
-
-export const LEFT_LEG_PARTS = ["UpperLegLeft", "LowerLegLeft", "FootLeft"] as const;
-export const RIGHT_LEG_PARTS = ["UpperLegRight", "LowerLegRight", "FootRight"] as const;
-export const MOVABLE_PARTS = [...LEFT_LEG_PARTS, ...RIGHT_LEG_PARTS] as const;
+export type MovablePart = (typeof MOVABLE_PARTS)[number];
 
 export function isPartName(name: string): name is PartName {
   return (PART_NAMES as readonly string[]).includes(name);
 }
 
-export function isLeftLegPart(name: string): boolean {
-  return (LEFT_LEG_PARTS as readonly string[]).includes(name);
+export function isMovablePart(name: string): name is MovablePart {
+  return (MOVABLE_PARTS as readonly string[]).includes(name);
 }
 
-export function isMovablePart(name: string): name is PartName {
-  return (MOVABLE_PARTS as readonly string[]).includes(name);
+export function isShoulderPart(name: string): name is (typeof SHOULDER_PARTS)[number] {
+  return (SHOULDER_PARTS as readonly string[]).includes(name);
+}
+
+export function isHingePart(name: string): name is (typeof HINGE_PARTS)[number] {
+  return (HINGE_PARTS as readonly string[]).includes(name);
+}
+
+export function isLowerLegPart(name: string): name is (typeof LOWER_LEG_PARTS)[number] {
+  return (LOWER_LEG_PARTS as readonly string[]).includes(name);
+}
+
+export function isFootPart(name: string): name is (typeof FOOT_PARTS)[number] {
+  return (FOOT_PARTS as readonly string[]).includes(name);
+}
+
+export function isUpperLegPart(name: string): name is (typeof UPPER_LEG_PARTS)[number] {
+  return (UPPER_LEG_PARTS as readonly string[]).includes(name);
+}
+
+export function isFrontShoulderPart(name: string): boolean {
+  return isShoulderPart(name) && name.endsWith("1");
+}
+
+export function isBackShoulderPart(name: string): boolean {
+  return isShoulderPart(name) && name.endsWith("3");
 }
 
 export function findPartName(object: { name: string; parent: unknown }): PartName | null {

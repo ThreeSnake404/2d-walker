@@ -1,4 +1,4 @@
-import type { OrthographicCamera } from "three";
+import type { Camera, OrthographicCamera } from "three";
 import type { OrbitControlsImpl } from "./controls";
 import { snapLookAt } from "./cameraPose";
 
@@ -76,23 +76,26 @@ export async function saveCameraStart(cameraStart: CameraStart): Promise<{ saved
 }
 
 export function captureCameraStart(
-  camera: OrthographicCamera,
+  camera: Camera,
   controls: OrbitControlsImpl,
 ): CameraStart {
   return {
     position: camera.position.toArray() as [number, number, number],
     target: controls.target.toArray() as [number, number, number],
-    zoom: camera.zoom,
+    zoom: (camera as OrthographicCamera).zoom ?? 1,
     up: camera.up.toArray() as [number, number, number],
   };
 }
 
 export function applyCameraStart(
-  camera: OrthographicCamera,
+  camera: Camera,
   controls: OrbitControlsImpl,
   cameraStart: CameraStart,
 ) {
-  camera.zoom = cameraStart.zoom;
-  camera.updateProjectionMatrix();
+  const ortho = camera as OrthographicCamera;
+  if (ortho.isOrthographicCamera) {
+    ortho.zoom = cameraStart.zoom;
+    ortho.updateProjectionMatrix();
+  }
   snapLookAt(camera, controls, cameraStart.position, cameraStart.up, cameraStart.target);
 }

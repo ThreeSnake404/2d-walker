@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { OrbitControls } from "@react-three/drei";
 import { useThree } from "@react-three/fiber";
-import { Box3, type OrthographicCamera as OrthographicCameraImpl } from "three";
+import { Box3, DoubleSide, type Camera } from "three";
 import type { OrbitControlsImpl } from "../walker/controls";
 import { poseFromCamera, type CameraPose, type FrameInfo } from "../walker/cameraPose";
 import { frameDefaultView } from "../walker/frameView";
@@ -12,14 +12,15 @@ import { WalkerModel } from "./WalkerModel";
 type WalkerSceneProps = {
   selectedPart: PartName | null;
   onSelectPart: (part: PartName | null) => void;
-  onReady: (camera: OrthographicCameraImpl, controls: OrbitControlsImpl, frame: FrameInfo) => void;
+  onReady: (camera: Camera, controls: OrbitControlsImpl, frame: FrameInfo) => void;
   onCameraMove: (pose: CameraPose) => void;
 };
 
 export function WalkerScene({ selectedPart, onSelectPart, onReady, onCameraMove }: WalkerSceneProps) {
-  const camera = useThree((state) => state.camera) as OrthographicCameraImpl;
+  const camera = useThree((state) => state.camera);
   const controlsRef = useRef<OrbitControlsImpl>(null);
   const [orbitControls, setOrbitControls] = useState<OrbitControlsImpl | null>(null);
+  const [groundY, setGroundY] = useState(0);
   const framedRef = useRef(false);
   const { size } = useThree();
 
@@ -32,6 +33,7 @@ export function WalkerScene({ selectedPart, onSelectPart, onReady, onCameraMove 
       const controls = controlsRef.current;
       if (!controls || framedRef.current) return;
 
+      setGroundY(box.min.y);
       const frame = frameDefaultView(camera, controls, box, size.width, size.height);
       framedRef.current = true;
       onReady(camera, controls, frame);
@@ -73,7 +75,11 @@ export function WalkerScene({ selectedPart, onSelectPart, onReady, onCameraMove 
       <directionalLight position={[8, 14, 18]} intensity={1.35} />
       <ambientLight intensity={0.28} />
 
-      <gridHelper args={[40, 40, "#3d4654", "#2a313c"]} position={[0, 0, 0]} />
+      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, groundY - 0.04, 0]} receiveShadow>
+        <planeGeometry args={[64, 64]} />
+        <meshBasicMaterial color="#6fc45a" side={DoubleSide} />
+      </mesh>
+      <gridHelper args={[64, 32, "#8ee07a", "#57a348"]} position={[0, groundY - 0.03, 0]} />
       <LabeledAxes size={8} />
       <WalkerModel
         selectedPart={selectedPart}

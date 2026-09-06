@@ -1,4 +1,4 @@
-import { Box3, Vector3, type OrthographicCamera } from "three";
+import { Box3, Vector3, type Camera } from "three";
 import type { OrbitControlsImpl } from "./controls";
 import { applyViewPreset, type FrameInfo } from "./cameraPose";
 
@@ -11,7 +11,7 @@ const _center = new Vector3();
  * The XZ ground grid collapses to a single horizontal line.
  */
 export function frameDefaultView(
-  camera: OrthographicCamera,
+  camera: Camera,
   controls: OrbitControlsImpl,
   box: Box3,
   viewWidth: number,
