@@ -12,7 +12,7 @@ import {
   type Object3D,
 } from "three";
 import { applyJointPose, getJoint, wrapAngleDelta } from "./joints";
-import { findPartName, isMovablePart, MOVABLE_PARTS, type PartName } from "./parts";
+import { findPartName, isSelectablePart, SELECTABLE_PARTS, type PartName } from "./parts";
 
 const _viewDir = new Vector3();
 const _screenX = new Vector3();
@@ -31,6 +31,10 @@ const _center = new Vector3();
 const _meshToPart = new Matrix4();
 const _inversePart = new Matrix4();
 const _axisRef = new Vector3();
+const _groundUp = new Vector3(0, 1, 0);
+const _camDir = new Vector3();
+const _planePoint = new Vector3();
+const _planeNormal = new Vector3();
 
 /** Front-view limbs are only a few pixels tall; pad clicks in screen space. */
 const PICK_PAD_PX = 24;
@@ -64,7 +68,7 @@ export function attachPickVolumes(root: Object3D) {
   if (root.userData.pickVolumesAttached) return;
   root.updateMatrixWorld(true);
 
-  for (const name of MOVABLE_PARTS) {
+  for (const name of SELECTABLE_PARTS) {
     const object = findNamedObject(root, name);
     if (!object) continue;
 
@@ -184,7 +188,7 @@ function pickByRaycast(
     _raycaster.setFromCamera(_ndc, camera);
     for (const hit of _raycaster.intersectObject(root, true)) {
       const part = findPartName(hit.object);
-      if (!part || !isMovablePart(part)) continue;
+      if (!part || !isSelectablePart(part)) continue;
       const object = findNamedObject(root, part);
       if (!object) continue;
       if (!best || hit.distance < best.distance) {
@@ -214,9 +218,9 @@ export function pickMovablePart(
 
   let best: { part: PartName; object: Object3D; distance: number; area: number } | null = null;
 
-  for (const name of MOVABLE_PARTS) {
+  for (const name of SELECTABLE_PARTS) {
     const object = findNamedObject(root, name);
-    if (!object || !partOwnBounds(object, name, _box)) continue;
+    if (!object || !object.visible || !partOwnBounds(object, name, _box)) continue;
     const bounds = projectBoxToScreen(_box, camera, element);
     if (!bounds) continue;
     const distance = distanceToRect(clientX, clientY, bounds.minX, bounds.minY, bounds.maxX, bounds.maxY);
@@ -294,6 +298,50 @@ function jointDragPlane(object: Object3D) {
   _screenX.normalize();
   _screenY.crossVectors(_viewDir, _screenX).normalize();
   return joint;
+}
+
+export function intersectGroundPlane(
+  camera: Camera,
+  clientX: number,
+  clientY: number,
+  element: HTMLElement,
+  height = 0,
+) {
+  pointerToNdc(clientX, clientY, element);
+  _raycaster.setFromCamera(_ndc, camera);
+  _plane.setFromNormalAndCoplanarPoint(_groundUp, _joint.set(0, height, 0));
+  if (!_raycaster.ray.intersectPlane(_plane, _hit)) return null;
+  return _hit;
+}
+
+export type WalkDragPlane = {
+  point: Vector3;
+  normal: Vector3;
+};
+
+export function walkDragPlane(camera: Camera, origin: Vector3): WalkDragPlane {
+  camera.getWorldDirection(_camDir);
+  if (_camDir.lengthSq() < 1e-8) _camDir.set(0, 0, -1);
+  _camDir.normalize();
+  return { point: origin.clone(), normal: _camDir.clone() };
+}
+
+/** Intersect the drag plane frozen at pointer-down, then keep only ZX. */
+export function intersectWalkDrag(
+  camera: Camera,
+  clientX: number,
+  clientY: number,
+  element: HTMLElement,
+  dragPlane: WalkDragPlane,
+) {
+  pointerToNdc(clientX, clientY, element);
+  _raycaster.setFromCamera(_ndc, camera);
+  _planePoint.copy(dragPlane.point);
+  _planeNormal.copy(dragPlane.normal);
+  _plane.setFromNormalAndCoplanarPoint(_planeNormal, _planePoint);
+  if (!_raycaster.ray.intersectPlane(_plane, _hit)) return null;
+  _hit.y = dragPlane.point.y;
+  return _hit;
 }
 
 export function beginLimbDrag(

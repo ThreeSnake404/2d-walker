@@ -1,11 +1,14 @@
 import { useEffect, useMemo, useRef } from "react";
 import { useGLTF } from "@react-three/drei";
 import { useThree } from "@react-three/fiber";
-import { Box3, Color, type Material, type Mesh, type MeshStandardMaterial } from "three";
+import { Box3, Color, Vector3, type Material, type Mesh, type MeshStandardMaterial } from "three";
 import type { OrbitControlsImpl } from "../walker/controls";
 import {
   attachPickVolumes,
   beginLimbDrag,
+  intersectWalkDrag,
+  walkDragPlane,
+  type WalkDragPlane,
   pickMovablePart,
   setPickVolumeHighlight,
   updateLimbDrag,
@@ -14,15 +17,38 @@ import {
 } from "../walker/dragRotate";
 import { bakeBindScale } from "../walker/bindScale";
 import { applyStartPose, bindJoints } from "../walker/joints";
-import { findPartName, MODEL_URL, type PartName } from "../walker/parts";
+import { findPartName, isChassisPart, MODEL_URL, type PartName } from "../walker/parts";
+import {
+  advanceBody,
+  capturePlants,
+  clearBodyDrag,
+  createWalkGait,
+  gaitIsBusy,
+  hideCornerLegs,
+  plantFeetOnGround,
+  pushBodyDrag,
+  readChassisPosition,
+  setBodyPosition,
+  solveWalkGait,
+  visibleBounds,
+  type ChassisPosition,
+  type WalkGait,
+} from "../walker/walkIk";
 
 const DRAG_PX = 12;
+const _chassisOrigin = new Vector3();
+
+export type ChassisApi = {
+  setPosition: (position: ChassisPosition) => void;
+};
 
 type WalkerModelProps = {
   selectedPart: PartName | null;
   orbitControls: OrbitControlsImpl | null;
   onBounds: (box: Box3) => void;
   onSelectPart: (part: PartName | null) => void;
+  onChassisMove: (position: ChassisPosition) => void;
+  onChassisApi: (api: ChassisApi) => void;
 };
 
 function eachMaterial(material: Material | Material[], visit: (material: MeshStandardMaterial) => void) {
@@ -33,11 +59,24 @@ function eachMaterial(material: Material | Material[], visit: (material: MeshSta
   }
 }
 
-export function WalkerModel({ selectedPart, orbitControls, onBounds, onSelectPart }: WalkerModelProps) {
+export function WalkerModel({
+  selectedPart,
+  orbitControls,
+  onBounds,
+  onSelectPart,
+  onChassisMove,
+  onChassisApi,
+}: WalkerModelProps) {
   const { scene } = useGLTF(MODEL_URL);
   const model = useMemo(() => scene.clone(true), [scene]);
   const { camera, gl, invalidate } = useThree();
   const dragRef = useRef<LimbDrag | null>(null);
+  const chassisDragRef = useRef<{
+    lastX: number;
+    lastZ: number;
+    plane: WalkDragPlane;
+  } | null>(null);
+  const gaitRef = useRef<WalkGait | null>(null);
   const modelRef = useRef(model);
   const selectedRef = useRef(selectedPart);
   const pendingRef = useRef<{
@@ -48,8 +87,15 @@ export function WalkerModel({ selectedPart, orbitControls, onBounds, onSelectPar
     moved: boolean;
   } | null>(null);
   const ignoreClickRef = useRef(false);
+  const onChassisMoveRef = useRef(onChassisMove);
+  onChassisMoveRef.current = onChassisMove;
   modelRef.current = model;
   selectedRef.current = selectedPart;
+
+  const publishChassis = () => {
+    const gait = gaitRef.current;
+    if (gait) onChassisMoveRef.current(readChassisPosition(gait));
+  };
 
   useEffect(() => {
     model.traverse((object) => {
@@ -64,9 +110,27 @@ export function WalkerModel({ selectedPart, orbitControls, onBounds, onSelectPar
     bakeBindScale(model);
     bindJoints(model);
     applyStartPose(model);
+    hideCornerLegs(model);
+    const gait = createWalkGait(model);
+    plantFeetOnGround(gait, 0);
+    gaitRef.current = gait;
     attachPickVolumes(model);
-    onBounds(new Box3().setFromObject(model));
+    onBounds(visibleBounds(model));
+    publishChassis();
   }, [model, onBounds]);
+
+  useEffect(() => {
+    onChassisApi({
+      setPosition: (position) => {
+        const gait = gaitRef.current;
+        if (!gait) return;
+        setBodyPosition(gait, position.x, position.y, position.z);
+        solveWalkGait(gait);
+        invalidate();
+        onChassisMoveRef.current(readChassisPosition(gait));
+      },
+    });
+  }, [invalidate, onChassisApi]);
 
   useEffect(() => {
     model.traverse((object) => {
@@ -82,6 +146,27 @@ export function WalkerModel({ selectedPart, orbitControls, onBounds, onSelectPar
     setPickVolumeHighlight(model, selectedPart);
   }, [model, selectedPart]);
 
+  // One loop owns time: it drains queued drag at walking speed, then solves the
+  // gait. Pointer handlers only queue intent, so the body can never outrun a step.
+  useEffect(() => {
+    let raf = 0;
+    let last = 0;
+    const tick = () => {
+      const gait = gaitRef.current;
+      const now = performance.now();
+      if (gait && gaitIsBusy(gait)) {
+        advanceBody(gait, last ? now - last : 16);
+        solveWalkGait(gait, now);
+        invalidate();
+        onChassisMoveRef.current(readChassisPosition(gait));
+      }
+      last = now;
+      raf = window.requestAnimationFrame(tick);
+    };
+    raf = window.requestAnimationFrame(tick);
+    return () => window.cancelAnimationFrame(raf);
+  }, [invalidate]);
+
   useEffect(() => {
     const element = gl.domElement;
     element.style.touchAction = "none";
@@ -94,6 +179,7 @@ export function WalkerModel({ selectedPart, orbitControls, onBounds, onSelectPar
     const finishPointer = () => {
       pendingRef.current = null;
       dragRef.current = null;
+      chassisDragRef.current = null;
       if (orbitControls) orbitControls.enabled = true;
       document.body.style.cursor = "auto";
     };
@@ -128,6 +214,23 @@ export function WalkerModel({ selectedPart, orbitControls, onBounds, onSelectPar
     };
 
     const onMove = (event: PointerEvent) => {
+      const chassisDrag = chassisDragRef.current;
+      const gait = gaitRef.current;
+      if (chassisDrag && gait) {
+        event.preventDefault();
+        const hit = intersectWalkDrag(camera, event.clientX, event.clientY, element, chassisDrag.plane);
+        if (!hit) return;
+        const dx = hit.x - chassisDrag.lastX;
+        const dz = hit.z - chassisDrag.lastZ;
+        if (!Number.isFinite(dx) || !Number.isFinite(dz)) return;
+        chassisDrag.lastX = hit.x;
+        chassisDrag.lastZ = hit.z;
+        // A grazing ray can spike; the leash bounds normal travel on its own.
+        if (dx * dx + dz * dz > 400) return;
+        pushBodyDrag(gait, dx, dz);
+        return;
+      }
+
       const drag = dragRef.current;
       if (drag) {
         event.preventDefault();
@@ -142,6 +245,24 @@ export function WalkerModel({ selectedPart, orbitControls, onBounds, onSelectPar
         if (distance < DRAG_PX) return;
         pending.moved = true;
         if (pending.selectedOnDown !== pending.picked.part) return;
+
+        if (isChassisPart(pending.picked.part) && gaitRef.current) {
+          const gait = gaitRef.current;
+          gait.chassis.getWorldPosition(_chassisOrigin);
+          const plane = walkDragPlane(camera, _chassisOrigin);
+          const hit = intersectWalkDrag(camera, pending.x, pending.y, element, plane);
+          if (!hit) return;
+          capturePlants(gait);
+          clearBodyDrag(gait);
+          chassisDragRef.current = {
+            lastX: hit.x,
+            lastZ: hit.z,
+            plane,
+          };
+          if (orbitControls) orbitControls.enabled = false;
+          document.body.style.cursor = "grabbing";
+          return;
+        }
 
         const nextDrag = beginLimbDrag(pending.picked.object, camera, pending.x, pending.y, element);
         if (!nextDrag) return;

@@ -13,10 +13,15 @@ import {
 
 export const SHOULDER_MIN_DEG = -44;
 export const SHOULDER_MAX_DEG = 50;
+/** Upper legs stop short of vertical so a leg can never stand straight up. */
 export const HINGE_MIN_DEG = -10;
-export const HINGE_MAX_DEG = 90;
-export const LOWER_LEG_MIN_DEG = -120;
-export const LOWER_LEG_MAX_DEG = 10;
+export const HINGE_MAX_DEG = 72;
+/**
+ * Knee interior angle is 180 - |lower leg pose|, so keeping the pose below -30
+ * leaves at least a 30 degree bend: the lower leg never lines up with the upper.
+ */
+export const LOWER_LEG_MIN_DEG = -140;
+export const LOWER_LEG_MAX_DEG = -30;
 export const FOOT_MIN_DEG = -90;
 export const FOOT_MAX_DEG = 90;
 export const START_FRONT_SHOULDER_DEG = 40;
@@ -138,6 +143,17 @@ export function applyJointPose(object: Object3D, joint: JointBind, pose: number)
   object.updateMatrixWorld(true);
 }
 
+/**
+ * Park a joint at its bind pose so bone directions can be measured.
+ * Limits are ignored on purpose: pose 0 is the reference the solvers measure
+ * against, and a range that excludes it must not shift that reference.
+ */
+export function setRestPose(object: Object3D, joint: JointBind) {
+  joint.pose = 0;
+  object.quaternion.copy(joint.restQuaternion);
+  object.updateMatrixWorld(true);
+}
+
 export function applyStartPose(root: Object3D) {
   const joints: { object: Object3D; joint: JointBind }[] = [];
   root.traverse((object) => {
@@ -184,7 +200,7 @@ function brickThinLocalAxis(object: Object3D, target: Vector3) {
   return target.set(0, 0, 1);
 }
 
-function flattenFoot(object: Object3D, joint: JointBind) {
+export function flattenFoot(object: Object3D, joint: JointBind) {
   const parent = object.parent;
   if (parent) {
     _hingeWorld.copy(joint.axisLocal).transformDirection(parent.matrixWorld).normalize();
@@ -195,7 +211,7 @@ function flattenFoot(object: Object3D, joint: JointBind) {
   let bestPose = 0;
   let bestAlign = -1;
   for (const upSign of [1, -1]) {
-    applyJointPose(object, joint, 0);
+    setRestPose(object, joint);
     brickThinLocalAxis(object, _brickLocal);
     _brickWorld.copy(_brickLocal).transformDirection(object.matrixWorld);
     _target.set(0, upSign, 0);

@@ -20,47 +20,103 @@
   pointer-events: none;
 }
 
-.hud-top {
-  top: 20px;
-  left: 20px;
-  right: 20px;
-  justify-content: space-between;
-  gap: 16px;
+.hud-view {
+  top: 16px;
+  left: 0;
+  right: 0;
+  justify-content: center;
+  gap: 8px;
+  pointer-events: none;
 }
 
-.hud-top h1 {
-  margin: 0;
-  font-size: 1.15rem;
-  font-weight: 650;
-  letter-spacing: 0.04em;
-}
-
-.hud-top p,
-.hud-save-status {
-  margin: 4px 0 0;
-  color: #9aa6b8;
-  font-size: 0.82rem;
-}
-
-.hud-top button {
+.hud-view button {
   pointer-events: auto;
   border: 0;
   border-radius: 999px;
-  padding: 10px 16px;
-  color: #11141a;
-  background: #f0c14b;
+  padding: 8px 16px;
+  color: #e8edf5;
+  background: #2a3340;
+  font-size: 0.82rem;
   font-weight: 650;
   cursor: pointer;
 }
 
-.hud-top button:hover {
-  background: #ffd56a;
+.hud-view button:hover {
+  background: #3a4656;
 }
 
-.hud-pose {
-  top: 88px;
-  left: 20px;
+.hud-view .view-button-projection {
+  color: #11141a;
+  background: #7ec8e3;
+}
+
+.hud-view .view-button-projection:hover {
+  background: #9ad7ed;
+}
+
+.hud-panel {
+  position: absolute;
+  top: 68px;
+  left: 0;
+  z-index: 3;
+  display: flex;
+  align-items: flex-start;
+  transform: translateX(-100%);
+  transition: transform 0.22s ease;
+  pointer-events: none;
+}
+
+.hud-panel.is-open {
+  transform: translateX(0);
+}
+
+.hud-panel-toggle {
+  position: absolute;
+  top: 8px;
+  left: 100%;
   pointer-events: auto;
+  border: 0;
+  border-radius: 0 10px 10px 0;
+  padding: 10px 12px;
+  color: #e8edf5;
+  background: rgba(12, 15, 20, 0.82);
+  backdrop-filter: blur(8px);
+  font-size: 0.75rem;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.hud-panel-toggle:hover {
+  background: rgba(42, 51, 64, 0.92);
+}
+
+.hud-panel-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 300px;
+  padding: 12px;
+  border-radius: 0 12px 12px 0;
+  background: rgba(12, 15, 20, 0.82);
+  backdrop-filter: blur(8px);
+  pointer-events: auto;
+}
+
+.hud-panel-body .camera-pose {
+  padding: 0;
+  background: transparent;
+  backdrop-filter: none;
+}
+
+.chassis-pos-hint {
+  margin: 0;
+  max-width: 280px;
+  color: #8b97a8;
+  font-size: 0.72rem;
+  line-height: 1.35;
 }
 
 .camera-pose {
@@ -119,54 +175,6 @@
 .camera-pose-unit {
   color: #8b97a8;
   font-weight: 650;
-}
-
-.view-buttons {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.view-buttons button {
-  border: 0;
-  border-radius: 999px;
-  padding: 6px 12px;
-  color: #e8edf5;
-  background: #2a3340;
-  font-size: 0.78rem;
-  font-weight: 650;
-  cursor: pointer;
-}
-
-.view-buttons button:hover {
-  background: #3a4656;
-}
-
-.view-buttons .view-button-projection {
-  color: #11141a;
-  background: #7ec8e3;
-}
-
-.view-buttons .view-button-projection:hover {
-  background: #9ad7ed;
-}
-
-.view-buttons .view-button-load {
-  color: #11141a;
-  background: #f0c14b;
-}
-
-.view-buttons .view-button-load:hover {
-  background: #ffd56a;
-}
-
-.hud-save-status {
-  position: absolute;
-  top: 72px;
-  right: 24px;
-  z-index: 2;
-  max-width: 360px;
-  text-align: right;
 }
 
 .hud-bottom {

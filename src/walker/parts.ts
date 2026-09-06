@@ -14,6 +14,21 @@ export const FOOT_PARTS = segmentNames("Foot");
 export const HINGE_PARTS = [...UPPER_LEG_PARTS, ...LOWER_LEG_PARTS, ...FOOT_PARTS] as const;
 export const MOVABLE_PARTS = [...SHOULDER_PARTS, ...HINGE_PARTS] as const;
 
+/** Index 2 is the middle pair. Corner legs (1 and 3) stay in the model but are hidden. */
+export const ACTIVE_LEG_INDEX = "2";
+export const CORNER_SHOULDER_PARTS = [
+  "ShoulderLeft1",
+  "ShoulderRight1",
+  "ShoulderLeft3",
+  "ShoulderRight3",
+] as const;
+export const ACTIVE_SHOULDER_PARTS = SHOULDER_PARTS.filter((name) => name.endsWith(ACTIVE_LEG_INDEX));
+export const ACTIVE_UPPER_LEG_PARTS = UPPER_LEG_PARTS.filter((name) => name.endsWith(ACTIVE_LEG_INDEX));
+export const ACTIVE_LOWER_LEG_PARTS = LOWER_LEG_PARTS.filter((name) => name.endsWith(ACTIVE_LEG_INDEX));
+export const ACTIVE_FOOT_PARTS = FOOT_PARTS.filter((name) => name.endsWith(ACTIVE_LEG_INDEX));
+export const ACTIVE_MOVABLE_PARTS = MOVABLE_PARTS.filter((name) => name.endsWith(ACTIVE_LEG_INDEX));
+export const SELECTABLE_PARTS = ["Chassis", ...ACTIVE_MOVABLE_PARTS] as const;
+
 export const PART_NAMES = ["Chassis", ...MOVABLE_PARTS] as const;
 
 export type PartName = (typeof PART_NAMES)[number];
@@ -25,6 +40,14 @@ export function isPartName(name: string): name is PartName {
 
 export function isMovablePart(name: string): name is MovablePart {
   return (MOVABLE_PARTS as readonly string[]).includes(name);
+}
+
+export function isSelectablePart(name: string): name is PartName {
+  return (SELECTABLE_PARTS as readonly string[]).includes(name);
+}
+
+export function isChassisPart(name: string): name is "Chassis" {
+  return name === "Chassis";
 }
 
 export function isShoulderPart(name: string): name is (typeof SHOULDER_PARTS)[number] {
@@ -45,6 +68,10 @@ export function isFootPart(name: string): name is (typeof FOOT_PARTS)[number] {
 
 export function isUpperLegPart(name: string): name is (typeof UPPER_LEG_PARTS)[number] {
   return (UPPER_LEG_PARTS as readonly string[]).includes(name);
+}
+
+export function isActiveLimbPart(name: string): boolean {
+  return isMovablePart(name) && name.endsWith(ACTIVE_LEG_INDEX);
 }
 
 export function isFrontShoulderPart(name: string): boolean {
