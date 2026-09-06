@@ -32,12 +32,28 @@ const CRITICAL = 0.93;
 const STEP_TRIGGER = 0.18;
 const STEP_DURATION_MS = 380;
 const STEP_HEIGHT = 0.08;
-const STRIDE = 0.48;
+/**
+ * Sanity ceilings on one step, as a share of leg reach. The arch band is what
+ * really sets stride length, per direction and per leg; these only catch
+ * degenerate geometry. Held tight they instead throttle whichever direction has
+ * the most room, which is fore/aft: swinging a foot forward barely changes how
+ * far it sits from the hip, so a leg has nearly twice the fore/aft travel it
+ * has sideways and used to spend less than half of it.
+ */
+const STRIDE = 1;
 const MIN_STEP = 0.35;
-const MAX_STEP = 0.55;
-/** How far ahead of the body a drag may get, as a fraction of leg reach. */
+const MAX_STEP = 1;
+/** How far the body may still travel after a drag ends, as a share of reach. */
 const LEASH = 0.5;
 const MAX_FRAME_MS = 64;
+/**
+ * How far a shoulder may yaw off its neutral aim over a stride. The joint
+ * itself allows 44 degrees the tighter way, but a stride that spends the last
+ * few degrees leaves the shoulder nothing for the yaw it also needs to cancel
+ * sideways error, and a clipped shoulder aims the swing plane off the footfall
+ * so the foot lands short and scuffs.
+ */
+const MAX_SWEEP = 40 * (Math.PI / 180);
 /** Standing arch: hip-to-foot span, and how far the foot sits below the hip. */
 const STAND_REACH = 0.72;
 const STAND_TILT = 38 * (Math.PI / 180);
@@ -71,6 +87,7 @@ const _soleProbe = new Vector3();
 const _stance = new Vector3();
 const _spanHip = new Vector3();
 const _spanBody = new Vector3();
+const _bodyNow = new Vector3();
 const _stanceErr = { along: 0, sideways: 0 };
 const _meshBox = new Box3();
 
@@ -101,6 +118,14 @@ export type WalkGait = {
   moved: boolean;
   /** Drag distance the body still owes the pointer, drained at walking speed. */
   pending: Vector3;
+  /**
+   * Ground point a held drag is steering toward. Tracking a destination rather
+   * than accumulating pointer deltas is what lets the body keep walking while
+   * the cursor is held still away from the chassis: there is still ground to
+   * cover, even though no new pointer movement is arriving.
+   */
+  goal: Vector3;
+  goalActive: boolean;
 };
 
 function findNamed(root: Object3D, name: string): Object3D | null {
@@ -353,6 +378,8 @@ export function createWalkGait(root: Object3D): WalkGait {
     moveDir: new Vector3(0, 0, 1),
     moved: false,
     pending: new Vector3(),
+    goal: new Vector3(),
+    goalActive: false,
   };
 }
 
@@ -445,6 +472,18 @@ function strideSpan(gait: WalkGait, leg: LegChain, dirX: number, dirZ: number) {
     else return { lead: leg.reachMax * 0.06, trail: leg.reachMax * 0.06 };
   }
 
+  // The shoulder has to yaw to aim the swing plane at each footfall, so a
+  // stride runs out when either the knee or the shoulder does. Walking straight
+  // ahead barely troubles the knee but swings the shoulder through its whole
+  // range, so without this the fore/aft stride would be the one that clips.
+  const perp = Math.sqrt(Math.max(0, nSq - p * p));
+  if (perp > 1e-4) {
+    const aim = Math.atan2(p, perp);
+    const square = Math.PI / 2 - 1e-3;
+    hi = Math.min(hi, perp * Math.tan(Math.min(square, aim + MAX_SWEEP)) - p);
+    lo = Math.max(lo, perp * Math.tan(Math.max(-square, aim - MAX_SWEEP)) - p);
+  }
+
   let lead = Math.max(leg.reachMax * 0.06, hi);
   let trail = Math.max(leg.reachMax * 0.06, -lo);
   // Cap the whole stride rather than each half, so a lopsided band keeps its
@@ -483,25 +522,44 @@ function bodySpeed(gait: WalkGait) {
   return (stride * DUTY) / (cycleMs / 1000);
 }
 
-/** Queue pointer travel instead of teleporting the body to the cursor. */
-export function pushBodyDrag(gait: WalkGait, dx: number, dz: number) {
-  gait.pending.x += dx;
-  gait.pending.z += dz;
+/** Restate the debt as the ground still between the body and the drag goal. */
+function oweDistanceToGoal(gait: WalkGait) {
+  gait.chassis.getWorldPosition(_bodyNow);
+  gait.pending.set(gait.goal.x - _bodyNow.x, 0, gait.goal.z - _bodyNow.z);
+  setMoveDirection(gait, gait.pending.x, gait.pending.z);
+}
+
+/** Steer toward a ground point instead of teleporting the body to the cursor. */
+export function setBodyGoal(gait: WalkGait, x: number, z: number) {
+  gait.goal.set(x, 0, z);
+  gait.goalActive = true;
+  oweDistanceToGoal(gait);
+}
+
+/**
+ * Pointer released: stop steering, but keep a short debt so the walk finishes
+ * the stride it is in and squares its legs up rather than freezing mid-step.
+ * The body is always somewhere behind the cursor, so without the leash it would
+ * carry on walking the whole way there long after the drag ended.
+ */
+export function releaseBodyGoal(gait: WalkGait) {
+  gait.goalActive = false;
   const leash = legReach(gait) * LEASH;
   const owed = Math.hypot(gait.pending.x, gait.pending.z);
   if (owed > leash && owed > 1e-8) {
     gait.pending.x *= leash / owed;
     gait.pending.z *= leash / owed;
   }
-  setMoveDirection(gait, gait.pending.x, gait.pending.z);
 }
 
 export function clearBodyDrag(gait: WalkGait) {
   gait.pending.set(0, 0, 0);
+  gait.goalActive = false;
 }
 
 /** Drain the queued drag at walking speed so the gait always has time to step. */
 export function advanceBody(gait: WalkGait, dtMs: number) {
+  if (gait.goalActive) oweDistanceToGoal(gait);
   const owed = Math.hypot(gait.pending.x, gait.pending.z);
   if (owed < 1e-6) return false;
   const budget = bodySpeed(gait) * (Math.min(MAX_FRAME_MS, Math.max(0, dtMs)) / 1000);

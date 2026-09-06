@@ -26,8 +26,9 @@ import {
   gaitIsBusy,
   hideCornerLegs,
   plantFeetOnGround,
-  pushBodyDrag,
   readChassisPosition,
+  releaseBodyGoal,
+  setBodyGoal,
   setBodyPosition,
   solveWalkGait,
   visibleBounds,
@@ -72,8 +73,9 @@ export function WalkerModel({
   const { camera, gl, invalidate } = useThree();
   const dragRef = useRef<LimbDrag | null>(null);
   const chassisDragRef = useRef<{
-    lastX: number;
-    lastZ: number;
+    /** Body position minus the grab point, so the chassis keeps its grip offset. */
+    offsetX: number;
+    offsetZ: number;
     plane: WalkDragPlane;
   } | null>(null);
   const gaitRef = useRef<WalkGait | null>(null);
@@ -177,6 +179,8 @@ export function WalkerModel({
       pickMovablePart(modelRef.current, camera, clientX, clientY, element, selectedRef.current);
 
     const finishPointer = () => {
+      const gait = gaitRef.current;
+      if (chassisDragRef.current && gait) releaseBodyGoal(gait);
       pendingRef.current = null;
       dragRef.current = null;
       chassisDragRef.current = null;
@@ -220,14 +224,12 @@ export function WalkerModel({
         event.preventDefault();
         const hit = intersectWalkDrag(camera, event.clientX, event.clientY, element, chassisDrag.plane);
         if (!hit) return;
-        const dx = hit.x - chassisDrag.lastX;
-        const dz = hit.z - chassisDrag.lastZ;
-        if (!Number.isFinite(dx) || !Number.isFinite(dz)) return;
-        chassisDrag.lastX = hit.x;
-        chassisDrag.lastZ = hit.z;
-        // A grazing ray can spike; the leash bounds normal travel on its own.
-        if (dx * dx + dz * dz > 400) return;
-        pushBodyDrag(gait, dx, dz);
+        const goalX = hit.x + chassisDrag.offsetX;
+        const goalZ = hit.z + chassisDrag.offsetZ;
+        if (!Number.isFinite(goalX) || !Number.isFinite(goalZ)) return;
+        // Aim at where the cursor is, not at how far it just moved, so holding it
+        // still keeps the body walking until it arrives.
+        setBodyGoal(gait, goalX, goalZ);
         return;
       }
 
@@ -255,8 +257,8 @@ export function WalkerModel({
           capturePlants(gait);
           clearBodyDrag(gait);
           chassisDragRef.current = {
-            lastX: hit.x,
-            lastZ: hit.z,
+            offsetX: _chassisOrigin.x - hit.x,
+            offsetZ: _chassisOrigin.z - hit.z,
             plane,
           };
           if (orbitControls) orbitControls.enabled = false;
