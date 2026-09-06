@@ -81,5 +81,6 @@ function walkerProjectPlugin(): Plugin {
 }
 
 export default defineConfig({
+  base: "./",
   plugins: [react(), walkerProjectPlugin()],
 });

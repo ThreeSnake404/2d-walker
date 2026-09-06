@@ -1,4 +1,4 @@
-export const MODEL_URL = "/model/2DWalker_v0_1.gltf";
+export const MODEL_URL = `${import.meta.env.BASE_URL}model/2DWalker_v0_1.gltf`;
 
 export const PART_NAMES = [
   "Base",
