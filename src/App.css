@@ -1,0 +1,186 @@
+.app {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.app-loading {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  letter-spacing: 0.04em;
+  color: #c5cedb;
+}
+
+.hud {
+  position: absolute;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  pointer-events: none;
+}
+
+.hud-top {
+  top: 20px;
+  left: 20px;
+  right: 20px;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.hud-top h1 {
+  margin: 0;
+  font-size: 1.15rem;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+}
+
+.hud-top p,
+.hud-save-status {
+  margin: 4px 0 0;
+  color: #9aa6b8;
+  font-size: 0.82rem;
+}
+
+.hud-top button {
+  pointer-events: auto;
+  border: 0;
+  border-radius: 999px;
+  padding: 10px 16px;
+  color: #11141a;
+  background: #f0c14b;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.hud-top button:hover {
+  background: #ffd56a;
+}
+
+.hud-pose {
+  top: 88px;
+  left: 20px;
+  pointer-events: auto;
+}
+
+.camera-pose {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(12, 15, 20, 0.72);
+  backdrop-filter: blur(8px);
+}
+
+.camera-pose-fields {
+  display: flex;
+  gap: 8px;
+}
+
+.camera-pose-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 92px;
+  padding: 4px 8px;
+  border: 1px solid;
+  border-radius: 8px;
+  background: rgba(17, 20, 26, 0.9);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.camera-pose-field input {
+  width: 72px;
+  border: 0;
+  padding: 2px 0;
+  color: #e8edf5;
+  background: transparent;
+  font: inherit;
+}
+
+.camera-pose-field input:focus {
+  outline: none;
+}
+
+.camera-pose-field input::-webkit-outer-spin-button,
+.camera-pose-field input::-webkit-inner-spin-button {
+  margin: 0;
+  -webkit-appearance: none;
+}
+
+.camera-pose-field input[type="number"] {
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+
+.camera-pose-unit {
+  color: #8b97a8;
+  font-weight: 650;
+}
+
+.view-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.view-buttons button {
+  border: 0;
+  border-radius: 999px;
+  padding: 6px 12px;
+  color: #e8edf5;
+  background: #2a3340;
+  font-size: 0.78rem;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.view-buttons button:hover {
+  background: #3a4656;
+}
+
+.view-buttons .view-button-load {
+  color: #11141a;
+  background: #f0c14b;
+}
+
+.view-buttons .view-button-load:hover {
+  background: #ffd56a;
+}
+
+.hud-save-status {
+  position: absolute;
+  top: 72px;
+  right: 24px;
+  z-index: 2;
+  max-width: 360px;
+  text-align: right;
+}
+
+.hud-bottom {
+  left: 0;
+  right: 0;
+  bottom: 0;
+  min-height: 64px;
+  padding: 12px 24px 18px;
+  justify-content: center;
+  flex-direction: column;
+  gap: 2px;
+  background: linear-gradient(180deg, transparent, rgba(10, 12, 16, 0.88));
+}
+
+.hud-label {
+  color: #8b97a8;
+  font-size: 0.72rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.hud-bottom strong {
+  font-size: 1.35rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-weight: 650;
+}
