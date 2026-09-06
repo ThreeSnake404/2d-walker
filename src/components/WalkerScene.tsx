@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { OrbitControls } from "@react-three/drei";
 import { useThree } from "@react-three/fiber";
 import { Box3, type OrthographicCamera as OrthographicCameraImpl } from "three";
@@ -19,6 +19,7 @@ type WalkerSceneProps = {
 export function WalkerScene({ selectedPart, onSelectPart, onReady, onCameraMove }: WalkerSceneProps) {
   const camera = useThree((state) => state.camera) as OrthographicCameraImpl;
   const controlsRef = useRef<OrbitControlsImpl>(null);
+  const [orbitControls, setOrbitControls] = useState<OrbitControlsImpl | null>(null);
   const framedRef = useRef(false);
   const { size } = useThree();
 
@@ -53,7 +54,10 @@ export function WalkerScene({ selectedPart, onSelectPart, onReady, onCameraMove 
   return (
     <>
       <OrbitControls
-        ref={controlsRef}
+        ref={(node) => {
+          controlsRef.current = node;
+          setOrbitControls(node);
+        }}
         makeDefault
         enableRotate
         enablePan
@@ -71,7 +75,12 @@ export function WalkerScene({ selectedPart, onSelectPart, onReady, onCameraMove 
 
       <gridHelper args={[40, 40, "#3d4654", "#2a313c"]} position={[0, 0, 0]} />
       <LabeledAxes size={8} />
-      <WalkerModel selectedPart={selectedPart} onBounds={handleBounds} onSelectPart={onSelectPart} />
+      <WalkerModel
+        selectedPart={selectedPart}
+        orbitControls={orbitControls}
+        onBounds={handleBounds}
+        onSelectPart={onSelectPart}
+      />
     </>
   );
 }

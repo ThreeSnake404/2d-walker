@@ -110,9 +110,9 @@ export default function App() {
       <Canvas
         orthographic
         camera={{ position: [0, 2, 40], zoom: 20, near: 0.1, far: 2000, up: [0, 1, 0] }}
+        frameloop="always"
         gl={{ antialias: true }}
         dpr={[1, 2]}
-        onPointerMissed={() => setSelectedPart(null)}
       >
         <WalkerScene
           selectedPart={selectedPart}
@@ -125,7 +125,7 @@ export default function App() {
       <div className="hud hud-top">
         <div>
           <h1>2D Walker</h1>
-          <p>Rotation in degrees · Front starts the view · drag to orbit</p>
+          <p>Click a leg or foot to select · click again to deselect · drag a selected segment to rotate</p>
         </div>
         <button type="button" onClick={handleSaveView}>
           Save starting view
@@ -144,8 +144,8 @@ export default function App() {
       <p className="hud-save-status">{saveStatus}</p>
 
       <div className="hud hud-bottom">
-        <span className="hud-label">Selected left segment</span>
-        <strong>{selectedPart ?? "Click a left leg segment"}</strong>
+        <span className="hud-label">Selected segment</span>
+        <strong>{selectedPart ?? "Click a leg or foot to select"}</strong>
       </div>
     </div>
   );
