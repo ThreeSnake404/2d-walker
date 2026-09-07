@@ -14,11 +14,14 @@ import {
  * and long before the joint limits would object, so a leg past either edge has
  * to step even though its pose is still legal.
  *
- * The far edge is set so a leading leg swings its lower segment about 20 degrees
- * past vertical, which is as much ground as one step can cover while the knee
- * still stays above the hip.
+ * The far edge is the longest hip-to-foot span that still keeps the knee above
+ * the hip. Crossing world-vertical is not part of that: the shank locks and
+ * the other triangle solution flips the lower bone skyward.
  */
 const STRETCH = 0.87;
+/** Standing shanks sit about 9° off world-vertical. Stay outside a dead zone
+ *  around that line so the solver never parks on it or tunnels through it. */
+const MIN_OFF_VERTICAL = 14 * (Math.PI / 180);
 const FOLD = 0.52;
 /**
  * Alarm thresholds, held just outside the band. A full-length step lands right
@@ -31,7 +34,12 @@ const FOLD_ALARM = FOLD - 0.02;
 const CRITICAL = 0.93;
 const STEP_TRIGGER = 0.18;
 const STEP_DURATION_MS = 380;
-const STEP_HEIGHT = 0.08;
+/** Peak sole lift on a swing, as a share of reach. Too small and a yawed
+ *  hinge plus the arch reject flattened the hop into a skate. */
+const STEP_HEIGHT = 0.18;
+/** How close a plant must sit to home before recover is done and the chassis
+ *  may move again. Looser than this left a trailing foot when W was held. */
+const RECOVER_HOME = 0.18;
 /**
  * Sanity ceilings on one step, as a share of leg reach. The arch band is what
  * really sets stride length, per direction and per leg; these only catch
@@ -43,8 +51,6 @@ const STEP_HEIGHT = 0.08;
 const STRIDE = 1;
 const MIN_STEP = 0.35;
 const MAX_STEP = 1;
-/** How far the body may still travel after a drag ends, as a share of reach. */
-const LEASH = 0.5;
 const MAX_FRAME_MS = 64;
 /**
  * How far a shoulder may yaw off its neutral aim over a stride. The joint
@@ -54,9 +60,11 @@ const MAX_FRAME_MS = 64;
  * so the foot lands short and scuffs.
  */
 const MAX_SWEEP = 40 * (Math.PI / 180);
-/** Standing arch: hip-to-foot span, and how far the foot sits below the hip. */
-const STAND_REACH = 0.72;
-const STAND_TILT = 38 * (Math.PI / 180);
+/** Standing arch: hip-to-foot span, and how far the foot sits below the hip.
+ *  38° / 0.72 parked the shank 9° off world-vertical — the L-pose the front
+ *  legs then locked into. A flatter, slightly longer stand keeps ~20° of lean. */
+const STAND_REACH = 0.78;
+const STAND_TILT = 28 * (Math.PI / 180);
 /**
  * How far a turning foot travels along the chassis before the body yaws.
  * Half that arc, at the stance radius, is the "half a step" the chassis then
@@ -67,6 +75,24 @@ const TURN_YAW_RATE = 0.7;
 
 function maxActiveSteps(legCount: number) {
   return Math.max(1, Math.floor(legCount / 3) || 1);
+}
+
+/** Extra swing slot only while a plant is already past the hold radius, so
+ *  two long legs can hop together instead of parking the chassis for two
+ *  full step times after a turn. */
+function stepSlots(gait: WalkGait) {
+  const normal = maxActiveSteps(gait.legs.length);
+  const travel = gait.pending.x * gait.pending.x + gait.pending.z * gait.pending.z;
+  if (travel < 1e-8 || plantedTravelScale(gait, gait.pending.x, gait.pending.z) > 1e-4) {
+    return normal;
+  }
+  chassisAxes(gait);
+  const side = gait.pending.x * _right.x + gait.pending.z * _right.z;
+  const along = gait.pending.x * _fwd.x + gait.pending.z * _fwd.z;
+  // Crab-walk lives on the hold edge. A second airborne leg there is the
+  // through-body snap; only double up when a forward/back park needs it.
+  if (Math.abs(side) >= Math.abs(along)) return normal;
+  return Math.min(2, Math.max(normal, gait.legs.length - 2));
 }
 
 const _hip = new Vector3();
@@ -99,6 +125,8 @@ const _fwd = new Vector3();
 const _right = new Vector3();
 const _yawAxis = new Vector3(0, 1, 0);
 const _qYaw = new Quaternion();
+const _restWorld = new Vector3();
+const _pinWant = new Vector3();
 const _stanceErr = { along: 0, sideways: 0 };
 const _meshBox = new Box3();
 
@@ -124,7 +152,16 @@ export type LegChain = {
   reachMax: number;
   /** Fixed foot offset along the hinge, which no joint rotation can undo. */
   sideOffset: number;
+  /**
+   * Neutral foot, in the chassis frame: x along right, z along forward.
+   * World-space offsets were left behind when the body yawed, so after about a
+   * half turn the hips had moved on and the "home" had not — stride collapsed
+   * and a huge leftover drag sat in the queue.
+   */
   restOffset: Vector3;
+  /** Shoulder pose at the start stance — the outboard heading. Biasing toward
+   *  pose 0 picked the through-chassis swing when crab-walking. */
+  homePose: number;
   plant: Vector3;
   airMs: number;
   step: { from: Vector3; to: Vector3; start: number; duration: number } | null;
@@ -152,6 +189,12 @@ export type WalkGait = {
   /** Held turn: -1 clockwise from above, +1 counter-clockwise, 0 idle. */
   turnHeld: number;
   turn: TurnCycle | null;
+  /**
+   * After a turn the plants sit fore/aft of home. The first thing back to a
+   * straight walk is a short step onto the start stance, so the shoulders can
+   * point out from the chassis again before any new stride.
+   */
+  recovering: boolean;
 };
 
 function findNamed(root: Object3D, name: string): Object3D | null {
@@ -202,11 +245,63 @@ export function footSoleY(foot: Object3D) {
   return minY;
 }
 
+function restWorld(gait: WalkGait, leg: LegChain, target: Vector3) {
+  chassisAxes(gait);
+  gait.chassis.getWorldPosition(_stance);
+  return target.set(
+    _stance.x + _right.x * leg.restOffset.x + _fwd.x * leg.restOffset.z,
+    0,
+    _stance.z + _right.z * leg.restOffset.x + _fwd.z * leg.restOffset.z,
+  );
+}
+
+function captureRest(gait: WalkGait, leg: LegChain, worldX: number, worldZ: number) {
+  chassisAxes(gait);
+  gait.chassis.getWorldPosition(_stance);
+  const dx = worldX - _stance.x;
+  const dz = worldZ - _stance.z;
+  leg.restOffset.set(dx * _right.x + dz * _right.z, 0, dx * _fwd.x + dz * _fwd.z);
+  const joint = getJoint(leg.shoulder);
+  if (joint) leg.homePose = joint.pose;
+}
+
+/**
+ * Keep a commanded foot on the outboard side of its hip. A sideways landing
+ * on the far side of the chassis is what folded a leg under the body.
+ */
+function legalizeFootXZ(gait: WalkGait, leg: LegChain, point: Vector3) {
+  restWorld(gait, leg, _restWorld);
+  leg.upper.getWorldPosition(_spanHip);
+  let ox = _restWorld.x - _spanHip.x;
+  let oz = _restWorld.z - _spanHip.z;
+  const home = Math.hypot(ox, oz);
+  if (home < 1e-5) return point;
+  ox /= home;
+  oz /= home;
+  const px = point.x - _spanHip.x;
+  const pz = point.z - _spanHip.z;
+  const along = px * ox + pz * oz;
+  const perpx = px - along * ox;
+  const perpz = pz - along * oz;
+  const minOut = leg.reachMax * FOLD;
+  const use = along < minOut ? minOut : along;
+  point.x = _spanHip.x + ox * use + perpx;
+  point.z = _spanHip.z + oz * use + perpz;
+  const hx = point.x - _spanHip.x;
+  const hz = point.z - _spanHip.z;
+  const horiz = Math.hypot(hx, hz);
+  const maxH = leg.reachMax * STRETCH;
+  if (horiz > maxH && horiz > 1e-6) {
+    point.x = _spanHip.x + hx * (maxH / horiz);
+    point.z = _spanHip.z + hz * (maxH / horiz);
+  }
+  return point;
+}
+
 export function recaptureStance(gait: WalkGait) {
-  gait.chassis.getWorldPosition(_from);
   for (const leg of gait.legs) {
     leg.foot.getWorldPosition(leg.plant);
-    leg.restOffset.set(leg.plant.x - _from.x, 0, leg.plant.z - _from.z);
+    captureRest(gait, leg, leg.plant.x, leg.plant.z);
   }
 }
 
@@ -301,6 +396,7 @@ export function plantFeetOnGround(gait: WalkGait, floorY: number) {
 
   recaptureStance(gait);
   gait.moved = false;
+  gait.recovering = false;
   clearBodyDrag(gait);
 }
 
@@ -364,8 +460,6 @@ export function createWalkGait(root: Object3D): WalkGait {
   const chassis = findNamed(root, "Chassis");
   if (!chassis) throw new Error("Chassis is missing.");
 
-  const chassisPos = new Vector3();
-  chassis.getWorldPosition(chassisPos);
   const legs: LegChain[] = [];
 
   for (let i = 0; i < ACTIVE_SHOULDER_PARTS.length; i += 1) {
@@ -389,14 +483,15 @@ export function createWalkGait(root: Object3D): WalkGait {
       lowerLen,
       ...reachBand(upperLen, lowerLen, lower),
       sideOffset: 0,
-      restOffset: new Vector3(plant.x - chassisPos.x, 0, plant.z - chassisPos.z),
+      restOffset: new Vector3(),
+      homePose: 0,
       plant,
       airMs: 0,
       step: null,
     });
   }
 
-  return {
+  const gaitDraft = {
     root,
     chassis,
     legs,
@@ -409,7 +504,10 @@ export function createWalkGait(root: Object3D): WalkGait {
     walkDriving: false,
     turnHeld: 0,
     turn: null,
-  };
+    recovering: false,
+  } as WalkGait;
+  for (const leg of gaitDraft.legs) captureRest(gaitDraft, leg, leg.plant.x, leg.plant.z);
+  return gaitDraft;
 }
 
 export type ChassisPosition = {
@@ -448,6 +546,7 @@ export function translateBody(gait: WalkGait, dx: number, dz: number) {
     leg.shoulder.position.z += dz;
   }
   gait.root.updateMatrixWorld(true);
+  holdPlantedFeet(gait);
   gait.moved = true;
 }
 
@@ -487,13 +586,18 @@ function rotateBody(gait: WalkGait, yaw: number) {
       joint.restQuaternion.premultiply(_qYaw);
       applyJointPose(leg.shoulder, joint, joint.pose);
     }
-    const ox = leg.restOffset.x;
-    const oz = leg.restOffset.z;
-    leg.restOffset.x = ox * c + oz * s;
-    leg.restOffset.z = -ox * s + oz * c;
   }
   gait.root.updateMatrixWorld(true);
+  holdPlantedFeet(gait);
   gait.moved = true;
+}
+
+/** Re-solve every planted sole back to its world plant after the hips moved. */
+function holdPlantedFeet(gait: WalkGait) {
+  for (const leg of gait.legs) {
+    if (leg.step) continue;
+    solvePinnedFoot(leg, leg.plant);
+  }
 }
 
 function legReach(gait: WalkGait) {
@@ -518,8 +622,9 @@ function legReach(gait: WalkGait) {
 function strideSpan(gait: WalkGait, leg: LegChain, dirX: number, dirZ: number) {
   leg.upper.getWorldPosition(_spanHip);
   gait.chassis.getWorldPosition(_spanBody);
-  const nx = _spanBody.x + leg.restOffset.x - _spanHip.x;
-  const nz = _spanBody.z + leg.restOffset.z - _spanHip.z;
+  restWorld(gait, leg, _restWorld);
+  const nx = _restWorld.x - _spanHip.x;
+  const nz = _restWorld.z - _spanHip.z;
   const drop = _spanHip.y - leg.plant.y;
   const far = leg.reachMax * STRETCH;
   const near = leg.reachMax * FOLD;
@@ -582,6 +687,9 @@ function strideSpan(gait: WalkGait, leg: LegChain, dirX: number, dirZ: number) {
  * that slips behind never catches up and gets dragged out of the arch.
  */
 const DUTY = 0.7;
+/** Trial multiplier on chassis speed. Step duration is unchanged, so this is
+ *  how we find out whether the existing cycle can keep the feet under the body. */
+const WALK_SPEED = 2;
 
 function bodySpeed(gait: WalkGait) {
   const slots = maxActiveSteps(gait.legs.length);
@@ -593,7 +701,7 @@ function bodySpeed(gait: WalkGait) {
     stride = Math.min(stride, span.lead + span.trail);
   }
   if (!Number.isFinite(stride)) stride = legReach(gait) * STRIDE;
-  return (stride * DUTY) / (cycleMs / 1000);
+  return (stride * DUTY * WALK_SPEED) / (cycleMs / 1000);
 }
 
 /** Restate the debt as the ground still between the body and the drag goal. */
@@ -605,25 +713,40 @@ function oweDistanceToGoal(gait: WalkGait) {
 
 /** Steer toward a ground point instead of teleporting the body to the cursor. */
 export function setBodyGoal(gait: WalkGait, x: number, z: number) {
+  if (gait.recovering || gait.turn || gait.turnHeld) return;
   gait.goal.set(x, 0, z);
   gait.goalActive = true;
   oweDistanceToGoal(gait);
 }
 
+function stanceNeedsRecover(gait: WalkGait) {
+  if (gaitHasSteps(gait)) return true;
+  return gait.legs.some((leg) => plantAwayFromHome(gait, leg) > RECOVER_HOME);
+}
+
 /**
- * Pointer released: stop steering, but keep a short debt so the walk finishes
- * the stride it is in and squares its legs up rather than freezing mid-step.
- * The body is always somewhere behind the cursor, so without the leash it would
- * carry on walking the whole way there long after the drag ended.
+ * Park the chassis and step every foot back to the start stance. Walk and drag
+ * stay queued as held intent; they do not drain until recover is finished.
+ */
+function startRecover(gait: WalkGait) {
+  if (gait.turn || gait.turnHeld) return;
+  clearBodyDrag(gait);
+  if (!stanceNeedsRecover(gait)) return;
+  gait.recovering = true;
+}
+
+/**
+ * Pointer or key released: stop the chassis and square the feet. A leftover
+ * leash would keep the body creeping and leave a trailing plant behind.
  */
 export function releaseBodyGoal(gait: WalkGait) {
   gait.goalActive = false;
-  const leash = legReach(gait) * LEASH;
-  const owed = Math.hypot(gait.pending.x, gait.pending.z);
-  if (owed > leash && owed > 1e-8) {
-    gait.pending.x *= leash / owed;
-    gait.pending.z *= leash / owed;
+  if (gait.turn || gait.turnHeld) {
+    gait.pending.set(0, 0, 0);
+    gait.walkDriving = false;
+    return;
   }
+  startRecover(gait);
 }
 
 export function clearBodyDrag(gait: WalkGait) {
@@ -646,25 +769,25 @@ export function setTurnHeld(gait: WalkGait, sign: number) {
  * chassis-local, so W stays "forward" after a turn.
  */
 function applyHeldWalk(gait: WalkGait) {
-  if (gait.turn || gait.turnHeld) {
+  if (gait.turn || gait.turnHeld || gait.recovering) {
     if (gait.walkDriving) {
-      releaseBodyGoal(gait);
       gait.walkDriving = false;
+      gait.goalActive = false;
+      gait.pending.set(0, 0, 0);
     }
     return;
   }
   const hx = gait.walkHeld.x;
   const hz = gait.walkHeld.z;
   if (hx * hx + hz * hz < 1e-8) {
-    if (gait.walkDriving) {
-      releaseBodyGoal(gait);
-      gait.walkDriving = false;
+    if (gait.walkDriving || Math.hypot(gait.pending.x, gait.pending.z) > 1e-6) {
+      startRecover(gait);
     }
     return;
   }
   chassisAxes(gait);
   gait.chassis.getWorldPosition(_bodyNow);
-  const reach = Math.max(4, legReach(gait) * 8);
+  const reach = Math.max(4, legReach(gait) * 2);
   setBodyGoal(
     gait,
     _bodyNow.x + _right.x * hx * reach + _fwd.x * hz * reach,
@@ -737,8 +860,10 @@ function beginTurnStep(gait: WalkGait, spec: TurnStepSpec, now: number) {
     }
   }
   _to.set(bestX, leg.plant.y, bestZ);
+  legalizeFootXZ(gait, leg, _to);
   const from = leg.plant.clone();
-  if (from.distanceTo(_to) < 0.2) return;
+  // Always hop, even when the orbit is short. Skipping the step used to fall
+  // straight through to the pivot, which then dragged that sole on the floor.
   leg.step = { from, to: _to.clone(), start: now, duration: STEP_DURATION_MS };
 }
 
@@ -753,8 +878,68 @@ function halfStepYaw(gait: WalkGait) {
   return Math.max(0.08, Math.min(0.28, (legReach(gait) * TURN_STEP * 0.5) / radius));
 }
 
+function plantAwayFromHome(gait: WalkGait, leg: LegChain) {
+  restWorld(gait, leg, _restWorld);
+  return Math.hypot(_restWorld.x - leg.plant.x, _restWorld.z - leg.plant.z);
+}
+
+/** Horizontal hip-to-plant, the same span `plantedTravelScale` refuses to grow. */
+function hipPlantHoriz(leg: LegChain, plant: Vector3) {
+  leg.upper.getWorldPosition(_hip);
+  return Math.hypot(_hip.x - plant.x, _hip.z - plant.z);
+}
+
+function overHold(leg: LegChain, plant: Vector3 = leg.plant) {
+  return hipPlantHoriz(leg, plant) > leg.reachMax * STRETCH;
+}
+
+function beginRecoverStep(gait: WalkGait, leg: LegChain, now: number) {
+  if (leg.step) return false;
+  restWorld(gait, leg, _restWorld);
+  const from = leg.plant.clone();
+  const to = _restWorld.clone();
+  to.y = from.y;
+  const span = from.distanceTo(to);
+  if (span <= RECOVER_HOME) return false;
+  // A recover is a short hop onto home, not a walking stride: cap the travel
+  // so a badly parked foot takes two partials instead of one long lunge.
+  const cap = Math.max(0.8, leg.reachMax * 0.4);
+  if (span > cap) {
+    to.sub(from).multiplyScalar(cap / span).add(from);
+    to.y = from.y;
+  }
+  legalizeFootXZ(gait, leg, to);
+  to.y = from.y;
+  leg.step = { from, to, start: now, duration: STEP_DURATION_MS * 0.65 };
+  return true;
+}
+
+function beginNextRecoverStep(gait: WalkGait, now: number) {
+  if (gaitHasSteps(gait)) return;
+  let next: LegChain | null = null;
+  let worst = RECOVER_HOME;
+  for (const leg of gait.legs) {
+    const away = plantAwayFromHome(gait, leg);
+    if (away > worst) {
+      worst = away;
+      next = leg;
+    }
+  }
+  if (!next) {
+    gait.recovering = false;
+    return;
+  }
+  if (!beginRecoverStep(gait, next, now)) gait.recovering = false;
+}
+
+function finishTurn(gait: WalkGait) {
+  gait.turn = null;
+  startRecover(gait);
+}
+
 function advanceTurn(gait: WalkGait, dtMs: number, now: number) {
   if (gait.turnHeld && !gait.turn) {
+    gait.recovering = false;
     clearBodyDrag(gait);
     gait.turn = { sign: gait.turnHeld, half: 0, stage: 0, pivotLeft: 0 };
   }
@@ -782,13 +967,12 @@ function advanceTurn(gait: WalkGait, dtMs: number, now: number) {
     return true;
   }
 
-  recaptureStance(gait);
   if (gait.turnHeld === gait.turn.sign) {
     gait.turn.half = gait.turn.half === 0 ? 1 : 0;
     gait.turn.stage = 0;
     gait.turn.pivotLeft = 0;
   } else if (gait.turnHeld === 0) {
-    gait.turn = null;
+    finishTurn(gait);
   } else {
     gait.turn = { sign: gait.turnHeld, half: 0, stage: 0, pivotLeft: 0 };
   }
@@ -802,13 +986,19 @@ export function applyHeldInputs(gait: WalkGait, dtMs: number, now: number) {
 
 /** Drain the queued drag at walking speed so the gait always has time to step. */
 export function advanceBody(gait: WalkGait, dtMs: number) {
+  if (gait.recovering || gait.turn) return false;
   if (gait.goalActive) oweDistanceToGoal(gait);
   const owed = Math.hypot(gait.pending.x, gait.pending.z);
   if (owed < 1e-6) return false;
   const budget = bodySpeed(gait) * (Math.min(MAX_FRAME_MS, Math.max(0, dtMs)) / 1000);
   const scale = budget >= owed ? 1 : budget / owed;
-  const dx = gait.pending.x * scale;
-  const dz = gait.pending.z * scale;
+  let dx = gait.pending.x * scale;
+  let dz = gait.pending.z * scale;
+  const hold = plantedTravelScale(gait, dx, dz);
+  dx *= hold;
+  dz *= hold;
+  if (hold < 0.999) gait.moved = true;
+  if (Math.hypot(dx, dz) < 1e-8) return hold < 0.999;
   gait.pending.x -= dx;
   gait.pending.z -= dz;
   translateBody(gait, dx, dz);
@@ -822,7 +1012,7 @@ export function capturePlants(gait: WalkGait) {
   }
 }
 
-function faceShoulder(leg: LegChain, target: Vector3) {
+function faceShoulder(leg: LegChain, target: Vector3, pin = false) {
   const joint = getJoint(leg.shoulder);
   if (!joint) return;
 
@@ -861,29 +1051,130 @@ function faceShoulder(leg: LegChain, target: Vector3) {
     // other is the same plane flipped through the chassis. Take the pose nearer
     // the current one, and refuse a jump past a right angle.
     const cost = (candidate: number) => {
-      const jump = Math.abs(wrapAngleDelta(candidate - pose));
+      const jump = Math.abs(wrapAngleDelta(candidate - held));
       const clip = candidate < joint.min ? joint.min - candidate : candidate > joint.max ? candidate - joint.max : 0;
-      return jump + clip * 4 + (jump > Math.PI * 0.5 ? 8 : 0);
+      const fromHome = Math.abs(wrapAngleDelta(candidate - leg.homePose));
+      // Past the start-stance sweep the heading is the through-chassis fold.
+      if (fromHome > MAX_SWEEP + 0.12) return 1e6;
+      return jump + clip * 4 + fromHome * 0.45 + (jump > Math.PI * 0.5 ? 8 : 0);
     };
     const next = cost(poseA) <= cost(poseB) ? poseA : poseB;
-    if (Math.abs(wrapAngleDelta(next - pose)) > Math.PI * 0.5) break;
+    if (cost(next) >= 1e6) break;
+    const jump = Math.abs(wrapAngleDelta(next - pose));
+    if (!pin && jump > Math.PI * 0.5) break;
     pose = next;
   }
   applyJointPose(leg.shoulder, joint, pose);
+}
+
+/**
+ * Reverse IK: the sole stays at `plant` in world space. Shoulder yaw only
+ * exists here to keep that point in the swing plane; the foot itself does
+ * not travel. Hip-relative "restore" is how trailing legs were skating out.
+ */
+function solvePinnedFoot(leg: LegChain, plant: Vector3) {
+  const wantX = plant.x;
+  const wantY = plant.y;
+  const wantZ = plant.z;
+  _pinWant.set(wantX, wantY, wantZ);
+  let solved = { stretched: false, folded: false, illegal: false };
+  // The chassis already moved the hip. Each pass must pull the sole the
+  // rest of the way back to the same world point; stopping short is a drag.
+  // Aim the shoulder at the real plant only. Chasing the overshoot target
+  // wound the yaw a little more every frame until the hold radius ran out.
+  for (let i = 0; i < 10; i += 1) {
+    faceShoulder(leg, plant, true);
+    solved = solveReach(leg, _pinWant, true);
+    leg.foot.getWorldPosition(_from);
+    const ex = wantX - _from.x;
+    const ez = wantZ - _from.z;
+    if (Math.hypot(ex, ez) < 0.02) return solved;
+    _pinWant.set(wantX + ex, wantY, wantZ + ez);
+  }
+  leg.foot.getWorldPosition(_from);
+  const slip = Math.hypot(_from.x - wantX, _from.z - wantZ);
+  return { ...solved, stretched: slip > 0.05, illegal: slip > 0.05 };
+}
+
+/**
+ * How far the chassis may still travel this frame before a planted sole
+ * would be pulled off its world point. Zero means a step has to happen first.
+ */
+function plantedTravelScale(gait: WalkGait, dx: number, dz: number) {
+  const travel = dx * dx + dz * dz;
+  if (travel < 1e-12) return 1;
+  let scale = 1;
+  for (const leg of gait.legs) {
+    if (leg.step) continue;
+    leg.upper.getWorldPosition(_hip);
+    const ox = _hip.x - leg.plant.x;
+    const oz = _hip.z - leg.plant.z;
+    const maxR = leg.reachMax * STRETCH;
+    const a = travel;
+    const b = 2 * (ox * dx + oz * dz);
+    const c = ox * ox + oz * oz - maxR * maxR;
+    if (c > 0) {
+      // Already past the hold radius. Walking further away is a drag; the
+      // chassis has to wait for a step. Closing the span is still legal, so a
+      // turn that left one hip long does not zero every heading.
+      if (b >= -1e-9) return 0;
+      const sClose = Math.min(1, -b / a);
+      if (sClose < scale) scale = Math.max(0, sClose);
+      continue;
+    }
+    const disc = b * b - 4 * a * c;
+    if (disc < 0) continue;
+    const sMax = (-b + Math.sqrt(disc)) / (2 * a);
+    if (sMax < scale) scale = Math.max(0, sMax);
+  }
+  return scale;
+}
+
+/**
+ * Rank a two-bone solution. The shank must point down and stay off world
+ * vertical: at the line itself the Jacobian dies, and a hair past it the other
+ * triangle answer is the inverted lower-leg the front pair was locking into.
+ */
+function stepClearance(leg: LegChain) {
+  return Math.max(1.15, leg.reachMax * STEP_HEIGHT);
+}
+
+function scoreArch(upperDir: Vector3, knee: Vector3, target: Vector3) {
+  _toFoot.copy(target).sub(knee);
+  const len = _toFoot.length();
+  if (len < 1e-6) return Number.NEGATIVE_INFINITY;
+  const lowerY = _toFoot.y / len;
+  const fromVert = Math.acos(Math.min(1, Math.abs(lowerY)));
+  if (lowerY >= 0) return -1e6 + fromVert;
+  if (fromVert < MIN_OFF_VERTICAL) return -1e5 + fromVert;
+  if (upperDir.y > 0.25) return -1e4 - upperDir.y;
+  if (knee.y < _hip.y - 0.02) return -2e6 + (knee.y - _hip.y);
+  return knee.y - _hip.y + fromVert;
 }
 
 function solveReach(leg: LegChain, target: Vector3, keepGround = false) {
   const upperJoint = getJoint(leg.upper);
   const lowerJoint = getJoint(leg.lower);
   const footJoint = getJoint(leg.foot);
-  if (!upperJoint || !lowerJoint) return { stretched: false, folded: false };
+  if (!upperJoint || !lowerJoint) return { stretched: false, folded: false, illegal: false };
+
+  const upperHeld = upperJoint.pose;
+  const lowerHeld = lowerJoint.pose;
+  const footHeld = footJoint?.pose ?? 0;
 
   setRestPose(leg.upper, upperJoint);
   setRestPose(leg.lower, lowerJoint);
   hingeWorld(leg.upper, _hinge);
   leg.upper.getWorldPosition(_hip);
+  const wantY = target.y;
   _offset.copy(target).sub(_hip);
-  if (!keepGround) _offset.projectOnPlane(_hinge);
+  if (!keepGround) {
+    _offset.projectOnPlane(_hinge);
+    // A shoulder that has yawed can stand the hinge up. Projecting onto that
+    // plane throws away world-Y, so the swing target collapses onto the floor
+    // and the foot skates. Put the arc height back after the aim is planar.
+    _offset.y = wantY - _hip.y;
+  }
   const reach = _offset.length();
   const stretched = reach > leg.reachMax * STRETCH_ALARM;
   const folded = reach < leg.reachMax * FOLD_ALARM;
@@ -894,8 +1185,11 @@ function solveReach(leg: LegChain, target: Vector3, keepGround = false) {
   // is held out past the folded zone and keeps its arch through the whole arc.
   const floor = keepGround ? leg.reachMin : leg.reachMax * FOLD;
   const d = Math.min(leg.reachMax, Math.max(floor, reach));
-  if (d < 1e-5) return { stretched, folded };
-  if (!keepGround) _offset.multiplyScalar(d / reach);
+  if (d < 1e-5) return { stretched, folded, illegal: false };
+  if (!keepGround) {
+    _offset.multiplyScalar(d / reach);
+    _offset.y = wantY - _hip.y;
+  }
 
   const cosHip = (leg.upperLen * leg.upperLen + d * d - leg.lowerLen * leg.lowerLen) / (2 * leg.upperLen * d);
   const usedBend = Math.acos(Math.min(1, Math.max(-1, cosHip)));
@@ -904,21 +1198,20 @@ function solveReach(leg: LegChain, target: Vector3, keepGround = false) {
   _upperB.copy(_toTarget).applyAxisAngle(_hinge, -usedBend);
   _kneeA.copy(_hip).addScaledVector(_upperA, leg.upperLen);
   _kneeB.copy(_hip).addScaledVector(_upperB, leg.upperLen);
-  // Knee-up, but never an upper bone that points skyward. A flipped hinge can
-  // make the "higher" knee the one that stands the leg straight up or folds it
-  // through the chassis; the other solution is the arch we actually want.
-  const aRise = _kneeA.y - _hip.y;
-  const bRise = _kneeB.y - _hip.y;
-  _upperDir.copy(aRise >= bRise ? _upperA : _upperB);
-  if (_upperDir.y > 0.25) {
-    const other = _upperDir === _upperA ? _upperB : _upperA;
-    if (other.y < _upperDir.y) _upperDir.copy(other);
+  _to.copy(_hip).add(_offset);
+  const scoreA = scoreArch(_upperA, _kneeA, _to);
+  const scoreB = scoreArch(_upperB, _kneeB, _to);
+  if (Math.max(scoreA, scoreB) < 0) {
+    applyJointPose(leg.upper, upperJoint, upperHeld);
+    applyJointPose(leg.lower, lowerJoint, lowerHeld);
+    if (footJoint) applyJointPose(leg.foot, footJoint, footHeld);
+    return { stretched, folded, illegal: true };
   }
+  _upperDir.copy(scoreA >= scoreB ? _upperA : _upperB);
 
   boneVector(leg.upper, leg.lower, _restBone);
   poseToward(leg.upper, _restBone, _upperDir, _hinge);
 
-  _to.copy(_hip).add(_offset);
   leg.lower.getWorldPosition(_knee);
   _toFoot.copy(_to).sub(_knee);
   setRestPose(leg.lower, lowerJoint);
@@ -927,7 +1220,17 @@ function solveReach(leg: LegChain, target: Vector3, keepGround = false) {
   poseToward(leg.lower, _restBone, _toFoot, _hinge);
 
   if (footJoint) flattenFoot(leg.foot, footJoint);
-  return { stretched, folded };
+
+  let illegal = keepGround && scoreA < 0 && scoreB < 0;
+  if (keepGround) {
+    boneVector(leg.lower, leg.foot, _toFoot);
+    if (_toFoot.lengthSq() > 1e-8) {
+      _toFoot.normalize();
+      const fromVert = Math.acos(Math.min(1, Math.abs(_toFoot.y)));
+      if (_toFoot.y >= 0 || fromVert < MIN_OFF_VERTICAL) illegal = true;
+    }
+  }
+  return { stretched, folded, illegal };
 }
 
 function landing(gait: WalkGait, leg: LegChain) {
@@ -949,19 +1252,23 @@ function landing(gait: WalkGait, leg: LegChain) {
   // Aim at the leg's neutral stance point rather than at its last footfall.
   // Neutral travels with the body, so sideways error is zeroed on every step
   // instead of accumulating into a wandering leg.
-  gait.chassis.getWorldPosition(_stance);
+  restWorld(gait, leg, _restWorld);
   _to.set(
-    _stance.x + leg.restOffset.x + _dir.x * lead,
+    _restWorld.x + _dir.x * lead,
     leg.plant.y,
-    _stance.z + leg.restOffset.z + _dir.z * lead,
+    _restWorld.z + _dir.z * lead,
   );
 
   leg.upper.getWorldPosition(_hip);
   _offset.set(_to.x - _hip.x, _to.y - _hip.y, _to.z - _hip.z);
   // Safety net only: the span already lands inside the arch, so this uses the
-  // same far edge rather than a tighter one that would undo the lead.
+  // same far edge rather than a tighter one that would undo the lead. Skip it
+  // when the current plant is already past that edge — collapsing the target
+  // onto the hip sphere then lands a few centimeters away, beginStep refuses
+  // the "short" hop, and the chassis stays locked.
   const comfortable = reachMax * STRETCH;
-  if (_offset.length() > comfortable && _offset.length() > 1e-6) {
+  const plantHoriz = Math.hypot(leg.plant.x - _hip.x, leg.plant.z - _hip.z);
+  if (_offset.length() > comfortable && plantHoriz < comfortable - 1e-3 && _offset.length() > 1e-6) {
     _offset.multiplyScalar(comfortable / _offset.length());
     _to.set(_hip.x + _offset.x, leg.plant.y, _hip.z + _offset.z);
   }
@@ -976,6 +1283,8 @@ function landing(gait: WalkGait, leg: LegChain) {
     _to.set(leg.plant.x + _offset.x, leg.plant.y, leg.plant.z + _offset.z);
   }
 
+  legalizeFootXZ(gait, leg, _to);
+  _to.y = leg.plant.y;
   return _to.clone();
 }
 
@@ -999,19 +1308,23 @@ function stanceError(gait: WalkGait, leg: LegChain) {
   _dir.copy(gait.moveDir).setY(0);
   if (_dir.lengthSq() < 1e-8) _dir.set(0, 0, 1);
   _dir.normalize();
-  gait.chassis.getWorldPosition(_from);
-  const dx = _from.x + leg.restOffset.x - leg.plant.x;
-  const dz = _from.z + leg.restOffset.z - leg.plant.z;
+  restWorld(gait, leg, _restWorld);
+  const dx = _restWorld.x - leg.plant.x;
+  const dz = _restWorld.z - leg.plant.z;
   _stanceErr.along = dx * _dir.x + dz * _dir.z;
   _stanceErr.sideways = Math.abs(dz * _dir.x - dx * _dir.z);
   return _stanceErr;
 }
 
 function reachNeed(gait: WalkGait, leg: LegChain, plant: Vector3): Omit<StepNeed, "leg"> {
-  faceShoulder(leg, plant);
+  // A planted shoulder must not yaw: that sweeps the sole sideways on the
+  // floor. Aiming is for an airborne swing only.
   leg.upper.getWorldPosition(_hip);
   const reach = _hip.distanceTo(plant);
   const frac = leg.reachMax > 1e-6 ? reach / leg.reachMax : 0;
+  hingeWorld(leg.upper, _hinge);
+  const offPlane = Math.abs(_offset.copy(plant).sub(_hip).dot(_hinge));
+  const planeSlip = offPlane > 0.4;
 
   // Let a trailing leg ride out its whole trail before stepping, so the stride
   // is set by how far the leg can actually travel rather than by a fixed
@@ -1019,7 +1332,9 @@ function reachNeed(gait: WalkGait, leg: LegChain, plant: Vector3): Omit<StepNeed
   // trips on a small threshold, since none of it is ever useful.
   const err = stanceError(gait, leg);
   const span = strideSpan(gait, leg, _dir.x, _dir.z);
-  const stretched = frac > STRETCH_ALARM;
+  const away = plantAwayFromHome(gait, leg);
+  const starved = away > leg.reachMax * 0.85;
+  const stretched = frac > STRETCH_ALARM || overHold(leg, plant);
   const folded = frac < FOLD_ALARM;
 
   // Measure need as a share of this leg's own budget. Legs on opposite sides of
@@ -1029,9 +1344,15 @@ function reachNeed(gait: WalkGait, leg: LegChain, plant: Vector3): Omit<StepNeed
   const urgency = Math.max(
     err.along / Math.max(1e-6, span.trail),
     err.sideways / (leg.reachMax * STEP_TRIGGER),
-    stretched || folded ? 1 : 0,
+    stretched || folded || planeSlip || starved ? 1 : 0,
   );
-  return { stretched, folded, displaced: urgency > 0.9, critical: frac > CRITICAL, urgency };
+  return {
+    stretched,
+    folded,
+    displaced: urgency > 0.9 || planeSlip || overHold(leg, plant) || starved,
+    critical: frac > CRITICAL || planeSlip || overHold(leg, plant) || starved,
+    urgency,
+  };
 }
 
 function finishStep(leg: LegChain, now: number, landedAt: Vector3, target: Vector3) {
@@ -1043,22 +1364,59 @@ function finishStep(leg: LegChain, now: number, landedAt: Vector3, target: Vecto
   target.copy(leg.plant);
 }
 
+function anyOverHold(gait: WalkGait) {
+  return gait.legs.some((leg) => !leg.step && overHold(leg));
+}
+
 function beginStep(gait: WalkGait, leg: LegChain, now: number) {
   const active = gait.legs.filter((entry) => entry.step).length;
-  if (leg.step || active >= maxActiveSteps(gait.legs.length)) return;
+  if (leg.step || active >= stepSlots(gait)) return;
   const from = leg.plant.clone();
   const to = landing(gait, leg);
-  if (from.distanceTo(to) < leg.reachMax * MIN_STEP * 0.5) return;
+  const minSpan = leg.reachMax * MIN_STEP * 0.5;
+  if (from.distanceTo(to) < minSpan) {
+    // After a turn, strideSpan often collapses. Refusing that hop freezes W
+    // once any planted hip is past the hold radius — sometimes a few metres
+    // later, once leftover yaw has used the last of the band.
+    if (!overHold(leg) && !anyOverHold(gait)) return;
+    restWorld(gait, leg, _restWorld);
+    _dir.copy(gait.moveDir).setY(0);
+    if (_dir.lengthSq() < 1e-8) _dir.set(0, 0, 1);
+    _dir.normalize();
+    const lead = Math.max(minSpan, strideSpan(gait, leg, _dir.x, _dir.z).lead);
+    to.set(_restWorld.x + _dir.x * lead, from.y, _restWorld.z + _dir.z * lead);
+    if (from.distanceTo(to) < 0.05) {
+      to.copy(_restWorld);
+      to.y = from.y;
+    }
+  }
+  to.y = from.y;
+  legalizeFootXZ(gait, leg, to);
   to.y = from.y;
   leg.step = { from, to, start: now, duration: STEP_DURATION_MS };
 }
 
-function stepTarget(leg: LegChain, now: number, target: Vector3) {
+/**
+ * Up, over, down. Horizontal travel only while the sole is clear of the
+ * floor — otherwise a shoulder yaw or a recover hop skates the foot.
+ */
+function swingPhase(t: number) {
+  const lift = Math.sin(Math.min(1, Math.max(0, t)) * Math.PI);
+  let along = 0;
+  if (t >= 0.82) along = 1;
+  else if (t > 0.18) along = (t - 0.18) / 0.64;
+  return { lift, along };
+}
+
+function stepTarget(gait: WalkGait, leg: LegChain, now: number, target: Vector3) {
   const step = leg.step;
   if (!step) return target.copy(leg.plant);
   const t = Math.min(1, Math.max(0, (now - step.start) / step.duration));
-  target.lerpVectors(step.from, step.to, t);
-  target.y = step.from.y + Math.sin(t * Math.PI) * leg.reachMax * STEP_HEIGHT;
+  const { lift, along } = swingPhase(t);
+  target.lerpVectors(step.from, step.to, along);
+  const hoist = step.from.y + lift * stepClearance(leg);
+  legalizeFootXZ(gait, leg, target);
+  target.y = hoist;
   if (t >= 1) {
     target.copy(step.to);
     target.y = step.from.y;
@@ -1067,28 +1425,11 @@ function stepTarget(leg: LegChain, now: number, target: Vector3) {
   return target;
 }
 
-function pickNextStepper(gait: WalkGait, needs: StepNeed[]) {
-  const slots = maxActiveSteps(gait.legs.length) - gait.legs.filter((leg) => leg.step).length;
-  if (slots <= 0) return null;
-  const needy = needs.filter((need) => !need.leg.step && (need.stretched || need.folded || need.displaced));
-  if (!needy.length) return null;
-  const critical = needy.filter((need) => need.critical);
-  const pool = critical.length ? critical : needy;
-  // Whoever has least room left goes first, measured against its own budget so
-  // the comparison is fair between legs with different amounts of room.
-  pool.sort((a, b) => {
-    if (a.critical !== b.critical) return a.critical ? -1 : 1;
-    if (Math.abs(a.urgency - b.urgency) > 0.02) return b.urgency - a.urgency;
-    if (a.leg.airMs !== b.leg.airMs) return a.leg.airMs - b.leg.airMs;
-    return a.leg.id.localeCompare(b.leg.id);
-  });
-  return pool[0]?.leg ?? null;
-}
-
 function solvePlanted(gait: WalkGait, leg: LegChain, plant: Vector3) {
+  const solved = solvePinnedFoot(leg, plant);
   const need = reachNeed(gait, leg, plant);
-  solveReach(leg, plant, true);
-  return need;
+  if (!solved.illegal) return need;
+  return { ...need, stretched: true, critical: true, urgency: 1 };
 }
 
 export function solveWalkGait(gait: WalkGait, now = performance.now()) {
@@ -1097,9 +1438,13 @@ export function solveWalkGait(gait: WalkGait, now = performance.now()) {
   gait.moved = false;
   const needs: StepNeed[] = [];
   for (const leg of gait.legs) {
-    stepTarget(leg, now, _target);
+    stepTarget(gait, leg, now, _target);
     if (leg.step) {
-      faceShoulder(leg, _target);
+      // Yaw only while the sole is off the floor. Waiting for XZ travel meant
+      // an in-place recover hop never squared the shoulder, so the hip stayed
+      // past the hold radius and the next walk locked.
+      const airborne = _target.y - leg.step.from.y > 0.12;
+      if (airborne) faceShoulder(leg, _target, gait.recovering);
       solveReach(leg, _target);
       continue;
     }
@@ -1107,9 +1452,24 @@ export function solveWalkGait(gait: WalkGait, now = performance.now()) {
     needs.push({ leg, ...need });
   }
   if (gait.turn) return;
-  if (!moving) return;
-  const next = pickNextStepper(gait, needs);
-  if (next) beginStep(gait, next, now);
+  if (gait.recovering) {
+    if (!gaitHasSteps(gait)) beginNextRecoverStep(gait, now);
+    return;
+  }
+  const locked = anyOverHold(gait);
+  const mustStep = locked || needs.some((need) => need.critical);
+  if (!moving && !mustStep) return;
+  const queue = needs.filter((need) => !need.leg.step && (need.stretched || need.folded || need.displaced || locked));
+  queue.sort((a, b) => {
+    const aHold = overHold(a.leg) ? 1 : 0;
+    const bHold = overHold(b.leg) ? 1 : 0;
+    if (aHold !== bHold) return bHold - aHold;
+    if (a.critical !== b.critical) return a.critical ? -1 : 1;
+    if (Math.abs(a.urgency - b.urgency) > 0.02) return b.urgency - a.urgency;
+    if (a.leg.airMs !== b.leg.airMs) return a.leg.airMs - b.leg.airMs;
+    return a.leg.id.localeCompare(b.leg.id);
+  });
+  for (const need of queue) beginStep(gait, need.leg, now);
 }
 
 export function gaitHasSteps(gait: WalkGait) {
@@ -1120,6 +1480,7 @@ export function gaitIsBusy(gait: WalkGait) {
   return (
     !!gait.turn ||
     gait.turnHeld !== 0 ||
+    gait.recovering ||
     gait.walkDriving ||
     gait.walkHeld.lengthSq() > 1e-8 ||
     gaitHasSteps(gait) ||
